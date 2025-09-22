@@ -1,1 +1,120 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
 
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Testing
+coverage
+*.lcov
+.nyc_output
+
+# Build outputs
+dist
+dist-ssr
+build
+*.local
+.cache
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-workspace
+*.sublime-project
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+._*
+
+# TypeScript
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Package manager files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Temporary files
+tmp
+temp
+*.tmp
+*.temp
+
+# SSL certificates
+*.pem
+*.key
+*.crt
+
+# Debug
+debug.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vercel
+.vercel
+
+# PWA files
+sw.*
+workbox-*.js
+
+# Storybook
+storybook-static
+
+# API keys and secrets
+*.secret
+api-keys.json
+secrets.json
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Performance profiling
+*.cpuprofile
+*.heapsnapshot
+
+# Documentation build
+docs-dist
+.docusaurus
+
+# React DevTools
+.react-devtools
