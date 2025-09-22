@@ -1,1 +1,83 @@
-
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="Real-time traffic monitoring for San Francisco Bay Area. Track road closures, accidents, and construction using 511.org data." />
+    <meta name="keywords" content="traffic, bay area, 511, road closures, accidents, real-time, san francisco, oakland, san jose" />
+    <meta name="author" content="511 Traffic Monitor" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="511 Bay Area Traffic Monitor" />
+    <meta property="og:description" content="Real-time traffic monitoring for San Francisco Bay Area" />
+    <meta property="og:image" content="/og-image.png" />
+    
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:title" content="511 Bay Area Traffic Monitor" />
+    <meta property="twitter:description" content="Real-time traffic monitoring for San Francisco Bay Area" />
+    <meta property="twitter:image" content="/og-image.png" />
+    
+    <!-- PWA -->
+    <meta name="theme-color" content="#3b82f6" />
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Preconnect to external domains -->
+    <link rel="preconnect" href="https://api.511.org" />
+    <link rel="preconnect" href="https://tile.openstreetmap.org" />
+    
+    <!-- Leaflet CSS -->
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
+    />
+    
+    <title>511 Bay Area Traffic Monitor</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    
+    <!-- No JavaScript Message -->
+    <noscript>
+      <div style="
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: system-ui, -apple-system, sans-serif;
+        padding: 20px;
+        text-align: center;
+      ">
+        <div>
+          <h1 style="color: #1e40af; margin-bottom: 10px;">
+            JavaScript Required
+          </h1>
+          <p style="color: #64748b;">
+            Please enable JavaScript to use the 511 Bay Area Traffic Monitor.
+          </p>
+        </div>
+      </div>
+    </noscript>
+    
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
