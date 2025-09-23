@@ -1,0 +1,66 @@
+{
+  "short_name": "511 Traffic",
+  "name": "511 Bay Area Traffic Monitor",
+  "description": "Real-time traffic monitoring for San Francisco Bay Area using 511.org data",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    }
+  ],
+  "id": "/?source=pwa",
+  "start_url": "/?source=pwa",
+  "background_color": "#ffffff",
+  "display": "standalone",
+  "scope": "/",
+  "theme_color": "#3b82f6",
+  "orientation": "any",
+  "categories": ["navigation", "travel", "utilities"],
+  "screenshots": [
+    {
+      "src": "/screenshot-desktop.png",
+      "type": "image/png",
+      "sizes": "1920x1080",
+      "form_factor": "wide"
+    },
+    {
+      "src": "/screenshot-mobile.png",
+      "type": "image/png",
+      "sizes": "390x844",
+      "form_factor": "narrow"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "View Closures",
+      "short_name": "Closures",
+      "description": "View current road closures",
+      "url": "/?filter=closures",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "View Incidents",
+      "short_name": "Incidents",
+      "description": "View current traffic incidents",
+      "url": "/?filter=incidents",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "prefer_related_applications": false,
+  "related_applications": [],
+  "features": [
+    "Real-time traffic updates",
+    "Road closure detection",
+    "Interactive map",
+    "Event filtering",
+    "Work zone data"
+  ]
+}
