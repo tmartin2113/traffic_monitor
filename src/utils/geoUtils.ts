@@ -1,60 +1,31 @@
 /**
  * Geographic Utility Functions
- * Helper functions for geospatial calculations and operations
+ * Utilities for coordinate calculations and geofencing
  */
 
-import { GEOFENCE } from '@utils/constants';
-import { MapCenter, MapBounds } from '@types/map.types';
-
-/**
- * Check if a point is within the geofence
- */
-export function isWithinGeofence(lat: number, lng: number): boolean {
-  const { xmin, xmax, ymin, ymax } = GEOFENCE.BBOX;
-  return lng >= xmin && lng <= xmax && lat >= ymin && lat <= ymax;
-}
-
-/**
- * Check if a point is within a polygon using ray casting algorithm
- */
-export function isPointInPolygon(point: [number, number], polygon: number[][]): boolean {
-  const [x, y] = point;
-  let inside = false;
-
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i][0];
-    const yi = polygon[i][1];
-    const xj = polygon[j][0];
-    const yj = polygon[j][1];
-
-    const intersect = ((yi > y) !== (yj > y)) &&
-      (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-    
-    if (intersect) inside = !inside;
-  }
-
-  return inside;
-}
+import { GEOFENCE } from './constants';
+import type { MapCenter, MapBounds } from '@/types/map.types';
+import type { Geography } from '@/types/api.types';
 
 /**
  * Calculate distance between two points using Haversine formula
- * Returns distance in meters
+ * @returns Distance in meters
  */
 export function calculateDistance(
   lat1: number,
-  lon1: number,
+  lng1: number,
   lat2: number,
-  lon2: number
+  lng2: number
 ): number {
-  const R = 6371000; // Earth's radius in meters
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δφ = (lat2 - lat1) * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const R = 6371e3; // Earth's radius in meters
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
+  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
 
-  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) *
-    Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const a =
+    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
   
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 
@@ -62,42 +33,111 @@ export function calculateDistance(
 }
 
 /**
+ * Check if coordinates are within geofence
+ */
+export function isWithinGeofence(lat: number, lng: number): boolean {
+  return (
+    lat >= GEOFENCE.BBOX.ymin &&
+    lat <= GEOFENCE.BBOX.ymax &&
+    lng >= GEOFENCE.BBOX.xmin &&
+    lng <= GEOFENCE.BBOX.xmax
+  );
+}
+
+/**
+ * Check if point is within bounds
+ */
+export function isWithinBounds(
+  point: MapCenter,
+  bounds: MapBounds
+): boolean {
+  return (
+    point.lat >= bounds.south &&
+    point.lat <= bounds.north &&
+    point.lng >= bounds.west &&
+    point.lng <= bounds.east
+  );
+}
+
+/**
+ * Check if point is within radius of center
+ */
+export function isWithinRadius(
+  point: MapCenter,
+  center: MapCenter,
+  radius: number // in meters
+): boolean {
+  const distance = calculateDistance(
+    point.lat,
+    point.lng,
+    center.lat,
+    center.lng
+  );
+  
+  return distance <= radius;
+}
+
+/**
  * Calculate bearing between two points
- * Returns bearing in degrees (0-360)
+ * @returns Bearing in degrees (0-360)
  */
 export function calculateBearing(
   lat1: number,
-  lon1: number,
+  lng1: number,
   lat2: number,
-  lon2: number
+  lng2: number
 ): number {
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
+  const φ1 = (lat1 * Math.PI) / 180;
+  const φ2 = (lat2 * Math.PI) / 180;
+  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
 
   const y = Math.sin(Δλ) * Math.cos(φ2);
-  const x = Math.cos(φ1) * Math.sin(φ2) -
-    Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
 
-  const θ = Math.atan2(y, x);
+  const bearing = (Math.atan2(y, x) * 180) / Math.PI;
 
-  return (θ * 180 / Math.PI + 360) % 360;
+  return (bearing + 360) % 360;
 }
 
 /**
  * Get compass direction from bearing
  */
 export function getCompassDirection(bearing: number): string {
-  const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE',
-                      'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
-  const index = Math.round(bearing / 22.5) % 16;
+  const directions = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const index = Math.round(bearing / 45) % 8;
   return directions[index];
 }
 
 /**
- * Calculate the center point of a bounding box
+ * Calculate bounds from center and radius
  */
-export function getBoundsCenter(bounds: MapBounds): MapCenter {
+export function calculateBoundsFromRadius(
+  center: MapCenter,
+  radius: number // in meters
+): MapBounds {
+  // Rough approximation
+  const lat = center.lat;
+  const lng = center.lng;
+  
+  // Degrees per meter (approximation)
+  const metersPerDegreeLat = 111320;
+  const metersPerDegreeLng = 111320 * Math.cos((lat * Math.PI) / 180);
+  
+  const deltaLat = radius / metersPerDegreeLat;
+  const deltaLng = radius / metersPerDegreeLng;
+  
+  return {
+    north: lat + deltaLat,
+    south: lat - deltaLat,
+    east: lng + deltaLng,
+    west: lng - deltaLng,
+  };
+}
+
+/**
+ * Calculate center point from bounds
+ */
+export function calculateCenterFromBounds(bounds: MapBounds): MapCenter {
   return {
     lat: (bounds.north + bounds.south) / 2,
     lng: (bounds.east + bounds.west) / 2,
@@ -105,110 +145,141 @@ export function getBoundsCenter(bounds: MapBounds): MapCenter {
 }
 
 /**
- * Calculate bounding box for a set of coordinates
+ * Calculate bounds from array of points
  */
-export function calculateBounds(coordinates: Array<[number, number]>): MapBounds {
-  if (coordinates.length === 0) {
-    return {
-      north: GEOFENCE.BBOX.ymax,
-      south: GEOFENCE.BBOX.ymin,
-      east: GEOFENCE.BBOX.xmax,
-      west: GEOFENCE.BBOX.xmin,
-    };
-  }
+export function calculateBoundsFromPoints(points: MapCenter[]): MapBounds | null {
+  if (points.length === 0) return null;
 
   let north = -90;
   let south = 90;
   let east = -180;
   let west = 180;
 
-  coordinates.forEach(([lng, lat]) => {
-    north = Math.max(north, lat);
-    south = Math.min(south, lat);
-    east = Math.max(east, lng);
-    west = Math.min(west, lng);
-  });
+  for (const point of points) {
+    north = Math.max(north, point.lat);
+    south = Math.min(south, point.lat);
+    east = Math.max(east, point.lng);
+    west = Math.min(west, point.lng);
+  }
 
   return { north, south, east, west };
 }
 
 /**
- * Add padding to bounds
+ * Extend bounds to include point
  */
-export function padBounds(bounds: MapBounds, paddingRatio: number = 0.1): MapBounds {
-  const latPadding = (bounds.north - bounds.south) * paddingRatio;
-  const lngPadding = (bounds.east - bounds.west) * paddingRatio;
-
+export function extendBounds(
+  bounds: MapBounds,
+  point: MapCenter
+): MapBounds {
   return {
-    north: bounds.north + latPadding,
-    south: bounds.south - latPadding,
-    east: bounds.east + lngPadding,
-    west: bounds.west - lngPadding,
+    north: Math.max(bounds.north, point.lat),
+    south: Math.min(bounds.south, point.lat),
+    east: Math.max(bounds.east, point.lng),
+    west: Math.min(bounds.west, point.lng),
   };
 }
 
 /**
- * Check if bounds intersect with geofence
+ * Check if bounds are valid
  */
-export function boundsIntersectGeofence(bounds: MapBounds): boolean {
-  const geofence = GEOFENCE.BBOX;
+export function isValidBounds(bounds: MapBounds): boolean {
+  return (
+    bounds.north > bounds.south &&
+    bounds.east > bounds.west &&
+    bounds.north <= 90 &&
+    bounds.south >= -90 &&
+    bounds.east <= 180 &&
+    bounds.west >= -180
+  );
+}
+
+/**
+ * Convert geography to coordinates array
+ */
+export function geographyToCoordinates(geography: Geography): number[] | number[][] {
+  if (geography.type === 'Point') {
+    return geography.coordinates as number[];
+  }
+  return geography.coordinates as number[][];
+}
+
+/**
+ * Get bounds from geography
+ */
+export function getBoundsFromGeography(geography: Geography): MapBounds | null {
+  const coords = geographyToCoordinates(geography);
   
-  return !(bounds.west > geofence.xmax ||
-           bounds.east < geofence.xmin ||
-           bounds.south > geofence.ymax ||
-           bounds.north < geofence.ymin);
+  if (geography.type === 'Point') {
+    const [lng, lat] = coords as number[];
+    return {
+      north: lat,
+      south: lat,
+      east: lng,
+      west: lng,
+    };
+  }
+  
+  // For LineString or MultiLineString
+  const points: MapCenter[] = [];
+  
+  if (geography.type === 'LineString') {
+    for (const coord of coords as number[][]) {
+      points.push({ lat: coord[1], lng: coord[0] });
+    }
+  } else if (geography.type === 'MultiLineString') {
+    for (const line of coords as number[][][]) {
+      for (const coord of line) {
+        points.push({ lat: coord[1], lng: coord[0] });
+      }
+    }
+  }
+  
+  return calculateBoundsFromPoints(points);
 }
 
 /**
- * Convert meters to miles
+ * Format coordinates for display
  */
-export function metersToMiles(meters: number): number {
-  return meters * 0.000621371;
-}
-
-/**
- * Convert meters to kilometers
- */
-export function metersToKilometers(meters: number): number {
-  return meters / 1000;
+export function formatCoordinates(
+  lat: number,
+  lng: number,
+  precision = 6
+): string {
+  const latStr = lat.toFixed(precision);
+  const lngStr = lng.toFixed(precision);
+  const latDir = lat >= 0 ? 'N' : 'S';
+  const lngDir = lng >= 0 ? 'E' : 'W';
+  
+  return `${Math.abs(parseFloat(latStr))}°${latDir}, ${Math.abs(parseFloat(lngStr))}°${lngDir}`;
 }
 
 /**
  * Format distance for display
  */
-export function formatDistance(meters: number, units: 'metric' | 'imperial' = 'imperial'): string {
-  if (units === 'imperial') {
-    const miles = metersToMiles(meters);
-    if (miles < 0.1) {
-      return `${Math.round(meters * 3.28084)} ft`;
-    } else if (miles < 10) {
-      return `${miles.toFixed(1)} mi`;
-    } else {
-      return `${Math.round(miles)} mi`;
-    }
-  } else {
-    if (meters < 1000) {
-      return `${Math.round(meters)} m`;
-    } else {
-      const km = metersToKilometers(meters);
-      if (km < 10) {
-        return `${km.toFixed(1)} km`;
-      } else {
-        return `${Math.round(km)} km`;
-      }
-    }
+export function formatDistance(meters: number): string {
+  if (meters < 1000) {
+    return `${Math.round(meters)}m`;
   }
+  
+  const km = meters / 1000;
+  
+  if (km < 10) {
+    return `${km.toFixed(1)}km`;
+  }
+  
+  return `${Math.round(km)}km`;
 }
 
 /**
- * Get zoom level for a given bounds
+ * Calculate zoom level for bounds
  */
-export function getZoomLevel(bounds: MapBounds, mapWidth: number, mapHeight: number): number {
+export function calculateZoomLevel(bounds: MapBounds, mapWidth: number, mapHeight: number): number {
   const WORLD_DIM = { height: 256, width: 256 };
   const ZOOM_MAX = 18;
 
   function latRad(lat: number): number {
-    const sin = Math.sin(lat * Math.PI / 180);
+    const sin = Math.sin((lat * Math.PI) / 180);
     const radX2 = Math.log((1 + sin) / (1 - sin)) / 2;
     return Math.max(Math.min(radX2, Math.PI), -Math.PI) / 2;
   }
@@ -219,7 +290,7 @@ export function getZoomLevel(bounds: MapBounds, mapWidth: number, mapHeight: num
 
   const latFraction = (latRad(bounds.north) - latRad(bounds.south)) / Math.PI;
   const lngDiff = bounds.east - bounds.west;
-  const lngFraction = ((lngDiff < 0) ? (lngDiff + 360) : lngDiff) / 360;
+  const lngFraction = (lngDiff < 0 ? lngDiff + 360 : lngDiff) / 360;
 
   const latZoom = zoom(mapHeight, WORLD_DIM.height, latFraction);
   const lngZoom = zoom(mapWidth, WORLD_DIM.width, lngFraction);
@@ -228,18 +299,21 @@ export function getZoomLevel(bounds: MapBounds, mapWidth: number, mapHeight: num
 }
 
 /**
- * Simplify a polyline using Douglas-Peucker algorithm
+ * Simplify coordinates array (Douglas-Peucker algorithm)
  */
-export function simplifyPolyline(points: Array<[number, number]>, tolerance: number = 0.0001): Array<[number, number]> {
-  if (points.length <= 2) return points;
+export function simplifyCoordinates(
+  coordinates: number[][],
+  tolerance = 0.0001
+): number[][] {
+  if (coordinates.length <= 2) return coordinates;
 
-  function getSquareDistance(p1: [number, number], p2: [number, number]): number {
+  function getSquareDistance(p1: number[], p2: number[]): number {
     const dx = p1[0] - p2[0];
     const dy = p1[1] - p2[1];
     return dx * dx + dy * dy;
   }
 
-  function getSquareSegmentDistance(p: [number, number], p1: [number, number], p2: [number, number]): number {
+  function getSquareSegmentDistance(p: number[], p1: number[], p2: number[]): number {
     let x = p1[0];
     let y = p1[1];
     let dx = p2[0] - x;
@@ -247,6 +321,7 @@ export function simplifyPolyline(points: Array<[number, number]>, tolerance: num
 
     if (dx !== 0 || dy !== 0) {
       const t = ((p[0] - x) * dx + (p[1] - y) * dy) / (dx * dx + dy * dy);
+
       if (t > 1) {
         x = p2[0];
         y = p2[1];
@@ -262,13 +337,13 @@ export function simplifyPolyline(points: Array<[number, number]>, tolerance: num
     return dx * dx + dy * dy;
   }
 
-  function simplifyDouglasPeucker(points: Array<[number, number]>, sqTolerance: number): Array<[number, number]> {
+  function simplifyDouglasPeucker(points: number[][], sqTolerance: number): number[][] {
     const len = points.length;
     const markers = new Uint8Array(len);
     let first = 0;
     let last = len - 1;
-    const stack: number[] = [];
-    const newPoints: Array<[number, number]> = [];
+    const stack = [];
+    const newPoints = [];
     let i, maxSqDist, sqDist, index;
 
     markers[first] = markers[last] = 1;
@@ -295,78 +370,35 @@ export function simplifyPolyline(points: Array<[number, number]>, tolerance: num
     }
 
     for (i = 0; i < len; i++) {
-      if (markers[i]) newPoints.push(points[i]);
+      if (markers[i]) {
+        newPoints.push(points[i]);
+      }
     }
 
     return newPoints;
   }
 
   const sqTolerance = tolerance * tolerance;
-  return simplifyDouglasPeucker(points, sqTolerance);
+  return simplifyDouglasPeucker(coordinates, sqTolerance);
 }
 
 /**
- * Get midpoint between two coordinates
+ * Check if point is inside polygon
  */
-export function getMidpoint(lat1: number, lon1: number, lat2: number, lon2: number): MapCenter {
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  const lat1Rad = lat1 * Math.PI / 180;
-  const lat2Rad = lat2 * Math.PI / 180;
-  const lon1Rad = lon1 * Math.PI / 180;
-
-  const Bx = Math.cos(lat2Rad) * Math.cos(dLon);
-  const By = Math.cos(lat2Rad) * Math.sin(dLon);
+export function isPointInPolygon(point: MapCenter, polygon: MapCenter[]): boolean {
+  let inside = false;
   
-  const lat3Rad = Math.atan2(
-    Math.sin(lat1Rad) + Math.sin(lat2Rad),
-    Math.sqrt((Math.cos(lat1Rad) + Bx) ** 2 + By ** 2)
-  );
-  
-  const lon3Rad = lon1Rad + Math.atan2(By, Math.cos(lat1Rad) + Bx);
-
-  return {
-    lat: lat3Rad * 180 / Math.PI,
-    lng: lon3Rad * 180 / Math.PI,
-  };
-}
-
-/**
- * Find the nearest point on a polyline to a given point
- */
-export function nearestPointOnPolyline(
-  point: [number, number],
-  polyline: Array<[number, number]>
-): { point: [number, number]; distance: number; index: number } {
-  let minDistance = Infinity;
-  let nearestPoint: [number, number] = polyline[0];
-  let nearestIndex = 0;
-
-  for (let i = 0; i < polyline.length - 1; i++) {
-    const start = polyline[i];
-    const end = polyline[i + 1];
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lng;
+    const yi = polygon[i].lat;
+    const xj = polygon[j].lng;
+    const yj = polygon[j].lat;
     
-    // Find nearest point on segment
-    const dx = end[0] - start[0];
-    const dy = end[1] - start[1];
-    const t = Math.max(0, Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / (dx * dx + dy * dy)));
+    const intersect = ((yi > point.lat) !== (yj > point.lat)) &&
+      (point.lng < (xj - xi) * (point.lat - yi) / (yj - yi) + xi);
     
-    const nearest: [number, number] = [
-      start[0] + t * dx,
-      start[1] + t * dy,
-    ];
-    
-    const distance = calculateDistance(point[1], point[0], nearest[1], nearest[0]);
-    
-    if (distance < minDistance) {
-      minDistance = distance;
-      nearestPoint = nearest;
-      nearestIndex = i;
-    }
+    if (intersect) inside = !inside;
   }
-
-  return {
-    point: nearestPoint,
-    distance: minDistance,
-    index: nearestIndex,
-  };
+  
+  return inside;
 }
