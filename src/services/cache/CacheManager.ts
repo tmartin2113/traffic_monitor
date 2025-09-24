@@ -1,120 +1,135 @@
 /**
  * Cache Manager Service
- * Implements in-memory and localStorage caching with TTL support
+ * Handles in-memory and localStorage caching with TTL support
  */
 
-import { CACHE_CONFIG } from '@utils/constants';
+import { CACHE_CONFIG, STORAGE_KEYS } from '@/utils/constants';
 
 interface CacheEntry<T> {
-  value: T;
+  data: T;
   timestamp: number;
   ttl: number;
-  hits: number;
+  key: string;
 }
 
 interface CacheStats {
-  size: number;
   hits: number;
   misses: number;
+  entries: number;
+  storageSize: number;
   hitRate: number;
-  oldestEntry: number | null;
-  newestEntry: number | null;
 }
 
 export class CacheManager {
   private memoryCache: Map<string, CacheEntry<any>>;
-  private hits: number = 0;
-  private misses: number = 0;
+  private stats: CacheStats;
   private maxSize: number;
-  private defaultTTL: number;
-  private static instance: CacheManager | null = null;
+  private useLocalStorage: boolean;
 
-  constructor(
-    maxSize: number = CACHE_CONFIG.MAX_CACHE_SIZE,
-    defaultTTL: number = CACHE_CONFIG.DEFAULT_TTL_MS
-  ) {
+  constructor(maxSize = CACHE_CONFIG.MAX_CACHE_SIZE, useLocalStorage = true) {
     this.memoryCache = new Map();
     this.maxSize = maxSize;
-    this.defaultTTL = defaultTTL;
-    this.loadFromLocalStorage();
-  }
+    this.useLocalStorage = useLocalStorage && this.isLocalStorageAvailable();
+    this.stats = {
+      hits: 0,
+      misses: 0,
+      entries: 0,
+      storageSize: 0,
+      hitRate: 0,
+    };
 
-  /**
-   * Get singleton instance
-   */
-  static getInstance(): CacheManager {
-    if (!CacheManager.instance) {
-      CacheManager.instance = new CacheManager();
+    // Load persisted cache from localStorage
+    if (this.useLocalStorage) {
+      this.loadFromLocalStorage();
     }
-    return CacheManager.instance;
+
+    // Set up periodic cleanup
+    this.startCleanupInterval();
   }
 
   /**
-   * Get cached value
+   * Get cached data
    */
   async get<T>(key: string): Promise<T | null> {
     // Check memory cache first
     const memoryEntry = this.memoryCache.get(key);
     
     if (memoryEntry) {
-      const now = Date.now();
-      const age = now - memoryEntry.timestamp;
+      if (this.isExpired(memoryEntry)) {
+        this.delete(key);
+        this.stats.misses++;
+        this.updateHitRate();
+        return null;
+      }
       
-      if (age <= memoryEntry.ttl) {
-        // Cache hit
-        memoryEntry.hits++;
-        this.hits++;
-        return memoryEntry.value as T;
-      } else {
-        // Expired
-        this.memoryCache.delete(key);
+      this.stats.hits++;
+      this.updateHitRate();
+      return memoryEntry.data as T;
+    }
+
+    // Check localStorage if enabled
+    if (this.useLocalStorage) {
+      const localEntry = this.getFromLocalStorage<T>(key);
+      
+      if (localEntry) {
+        if (this.isExpired(localEntry)) {
+          this.deleteFromLocalStorage(key);
+          this.stats.misses++;
+          this.updateHitRate();
+          return null;
+        }
+        
+        // Restore to memory cache
+        this.memoryCache.set(key, localEntry);
+        this.stats.hits++;
+        this.updateHitRate();
+        return localEntry.data;
       }
     }
 
-    // Check localStorage
-    const localEntry = this.getFromLocalStorage<T>(key);
-    if (localEntry) {
-      // Restore to memory cache
-      this.memoryCache.set(key, localEntry);
-      this.hits++;
-      return localEntry.value;
-    }
-
-    // Cache miss
-    this.misses++;
+    this.stats.misses++;
+    this.updateHitRate();
     return null;
   }
 
   /**
-   * Set cache value
+   * Set cache data with TTL
    */
-  async set<T>(
-    key: string, 
-    value: T, 
-    ttl: number = this.defaultTTL
-  ): Promise<void> {
-    // Enforce cache size limit
-    if (this.memoryCache.size >= this.maxSize) {
-      this.evictLRU();
-    }
-
+  async set<T>(key: string, data: T, ttl = CACHE_CONFIG.DEFAULT_TTL): Promise<void> {
     const entry: CacheEntry<T> = {
-      value,
+      data,
       timestamp: Date.now(),
       ttl,
-      hits: 0,
+      key,
     };
 
+    // Check cache size and evict if necessary
+    if (this.memoryCache.size >= this.maxSize) {
+      this.evictOldest();
+    }
+
+    // Set in memory cache
     this.memoryCache.set(key, entry);
-    this.saveToLocalStorage(key, entry);
+
+    // Persist to localStorage if enabled
+    if (this.useLocalStorage) {
+      this.setToLocalStorage(key, entry);
+    }
+
+    this.updateStats();
   }
 
   /**
-   * Delete cache entry
+   * Delete cached data
    */
-  async delete(key: string): Promise<boolean> {
+  delete(key: string): boolean {
     const deleted = this.memoryCache.delete(key);
-    this.removeFromLocalStorage(key);
+    
+    if (this.useLocalStorage) {
+      this.deleteFromLocalStorage(key);
+    }
+    
+    this.updateStats();
     return deleted;
   }
 
@@ -123,108 +138,88 @@ export class CacheManager {
    */
   async clear(): Promise<void> {
     this.memoryCache.clear();
-    this.clearLocalStorage();
-    this.hits = 0;
-    this.misses = 0;
-  }
-
-  /**
-   * Check if key exists and is valid
-   */
-  has(key: string): boolean {
-    const entry = this.memoryCache.get(key);
-    if (!entry) return false;
     
-    const now = Date.now();
-    const age = now - entry.timestamp;
-    
-    if (age > entry.ttl) {
-      this.memoryCache.delete(key);
-      return false;
+    if (this.useLocalStorage) {
+      this.clearLocalStorage();
     }
     
-    return true;
+    this.resetStats();
   }
 
   /**
    * Get cache statistics
    */
   getStats(): CacheStats {
-    const entries = Array.from(this.memoryCache.values());
-    const timestamps = entries.map(e => e.timestamp);
-    
-    return {
-      size: this.memoryCache.size,
-      hits: this.hits,
-      misses: this.misses,
-      hitRate: this.hits / Math.max(1, this.hits + this.misses),
-      oldestEntry: timestamps.length > 0 ? Math.min(...timestamps) : null,
-      newestEntry: timestamps.length > 0 ? Math.max(...timestamps) : null,
-    };
+    this.updateStats();
+    return { ...this.stats };
   }
 
   /**
-   * Prune expired entries
+   * Check if entry is expired
    */
-  prune(): number {
+  private isExpired(entry: CacheEntry<any>): boolean {
+    return Date.now() - entry.timestamp > entry.ttl;
+  }
+
+  /**
+   * Evict oldest cache entry
+   */
+  private evictOldest(): void {
+    let oldestKey: string | null = null;
+    let oldestTime = Infinity;
+
+    for (const [key, entry] of this.memoryCache.entries()) {
+      if (entry.timestamp < oldestTime) {
+        oldestTime = entry.timestamp;
+        oldestKey = key;
+      }
+    }
+
+    if (oldestKey) {
+      this.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Clean up expired entries
+   */
+  private cleanup(): void {
     const now = Date.now();
-    let pruned = 0;
-    
+    const keysToDelete: string[] = [];
+
     for (const [key, entry] of this.memoryCache.entries()) {
-      const age = now - entry.timestamp;
-      if (age > entry.ttl) {
-        this.memoryCache.delete(key);
-        this.removeFromLocalStorage(key);
-        pruned++;
+      if (this.isExpired(entry)) {
+        keysToDelete.push(key);
       }
     }
-    
-    return pruned;
-  }
 
-  /**
-   * Get all valid cache keys
-   */
-  keys(): string[] {
-    this.prune();
-    return Array.from(this.memoryCache.keys());
-  }
+    keysToDelete.forEach(key => this.delete(key));
 
-  /**
-   * Evict least recently used entry
-   */
-  private evictLRU(): void {
-    let lruKey: string | null = null;
-    let lruHits = Infinity;
-    let lruTimestamp = Infinity;
-    
-    for (const [key, entry] of this.memoryCache.entries()) {
-      if (entry.hits < lruHits || 
-         (entry.hits === lruHits && entry.timestamp < lruTimestamp)) {
-        lruKey = key;
-        lruHits = entry.hits;
-        lruTimestamp = entry.timestamp;
-      }
-    }
-    
-    if (lruKey) {
-      this.memoryCache.delete(lruKey);
-      this.removeFromLocalStorage(lruKey);
+    if (this.useLocalStorage) {
+      this.cleanupLocalStorage();
     }
   }
 
   /**
-   * Save to localStorage
+   * Start cleanup interval
    */
-  private saveToLocalStorage<T>(key: string, entry: CacheEntry<T>): void {
+  private startCleanupInterval(): void {
+    setInterval(() => {
+      this.cleanup();
+    }, 60000); // Clean up every minute
+  }
+
+  /**
+   * Check if localStorage is available
+   */
+  private isLocalStorageAvailable(): boolean {
     try {
-      const storageKey = `cache:${key}`;
-      const data = JSON.stringify(entry);
-      localStorage.setItem(storageKey, data);
-    } catch (error) {
-      console.warn('Failed to save to localStorage:', error);
-      // If localStorage is full, clear old cache entries
-      this.clearOldLocalStorageEntries();
+      const test = '__cache_test__';
+      localStorage.setItem(test, test);
+      localStorage.removeItem(test);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -233,103 +228,148 @@ export class CacheManager {
    */
   private getFromLocalStorage<T>(key: string): CacheEntry<T> | null {
     try {
-      const storageKey = `cache:${key}`;
-      const data = localStorage.getItem(storageKey);
+      const storageKey = `${STORAGE_KEYS.CACHE}_${key}`;
+      const item = localStorage.getItem(storageKey);
       
-      if (!data) return null;
+      if (!item) return null;
       
-      const entry = JSON.parse(data) as CacheEntry<T>;
-      const now = Date.now();
-      const age = now - entry.timestamp;
-      
-      if (age > entry.ttl) {
-        localStorage.removeItem(storageKey);
-        return null;
-      }
-      
-      return entry;
+      return JSON.parse(item) as CacheEntry<T>;
     } catch (error) {
-      console.warn('Failed to get from localStorage:', error);
+      console.error('Failed to get from localStorage:', error);
       return null;
     }
   }
 
   /**
-   * Remove from localStorage
+   * Set to localStorage
    */
-  private removeFromLocalStorage(key: string): void {
+  private setToLocalStorage<T>(key: string, entry: CacheEntry<T>): void {
     try {
-      const storageKey = `cache:${key}`;
-      localStorage.removeItem(storageKey);
+      const storageKey = `${STORAGE_KEYS.CACHE}_${key}`;
+      localStorage.setItem(storageKey, JSON.stringify(entry));
     } catch (error) {
-      console.warn('Failed to remove from localStorage:', error);
+      console.error('Failed to set to localStorage:', error);
+      // If storage is full, clear old cache entries
+      if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+        this.clearOldLocalStorageEntries();
+        // Try again
+        try {
+          const storageKey = `${STORAGE_KEYS.CACHE}_${key}`;
+          localStorage.setItem(storageKey, JSON.stringify(entry));
+        } catch {
+          // Give up if it still fails
+        }
+      }
     }
   }
 
   /**
-   * Load cache from localStorage on init
+   * Delete from localStorage
+   */
+  private deleteFromLocalStorage(key: string): void {
+    try {
+      const storageKey = `${STORAGE_KEYS.CACHE}_${key}`;
+      localStorage.removeItem(storageKey);
+    } catch (error) {
+      console.error('Failed to delete from localStorage:', error);
+    }
+  }
+
+  /**
+   * Load cache from localStorage
    */
   private loadFromLocalStorage(): void {
     try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith('cache:'));
-      const now = Date.now();
-      
-      for (const storageKey of keys) {
-        const key = storageKey.replace('cache:', '');
-        const data = localStorage.getItem(storageKey);
-        
-        if (data) {
+      const keys = Object.keys(localStorage).filter(key => 
+        key.startsWith(STORAGE_KEYS.CACHE)
+      );
+
+      for (const key of keys) {
+        const item = localStorage.getItem(key);
+        if (item) {
           try {
-            const entry = JSON.parse(data) as CacheEntry<any>;
-            const age = now - entry.timestamp;
-            
-            if (age <= entry.ttl && this.memoryCache.size < this.maxSize) {
-              this.memoryCache.set(key, entry);
+            const entry = JSON.parse(item) as CacheEntry<any>;
+            if (!this.isExpired(entry)) {
+              const cacheKey = key.replace(`${STORAGE_KEYS.CACHE}_`, '');
+              this.memoryCache.set(cacheKey, entry);
             } else {
-              localStorage.removeItem(storageKey);
+              localStorage.removeItem(key);
             }
           } catch {
-            localStorage.removeItem(storageKey);
+            localStorage.removeItem(key);
           }
         }
       }
     } catch (error) {
-      console.warn('Failed to load cache from localStorage:', error);
+      console.error('Failed to load from localStorage:', error);
     }
   }
 
   /**
-   * Clear all cache from localStorage
+   * Clear localStorage cache
    */
   private clearLocalStorage(): void {
     try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith('cache:'));
+      const keys = Object.keys(localStorage).filter(key => 
+        key.startsWith(STORAGE_KEYS.CACHE)
+      );
+      
       keys.forEach(key => localStorage.removeItem(key));
     } catch (error) {
-      console.warn('Failed to clear localStorage cache:', error);
+      console.error('Failed to clear localStorage:', error);
     }
   }
 
   /**
-   * Clear old localStorage cache entries when space is needed
+   * Clean up expired localStorage entries
+   */
+  private cleanupLocalStorage(): void {
+    try {
+      const keys = Object.keys(localStorage).filter(key => 
+        key.startsWith(STORAGE_KEYS.CACHE)
+      );
+
+      for (const key of keys) {
+        const item = localStorage.getItem(key);
+        if (item) {
+          try {
+            const entry = JSON.parse(item) as CacheEntry<any>;
+            if (this.isExpired(entry)) {
+              localStorage.removeItem(key);
+            }
+          } catch {
+            localStorage.removeItem(key);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to cleanup localStorage:', error);
+    }
+  }
+
+  /**
+   * Clear old localStorage entries when quota exceeded
    */
   private clearOldLocalStorageEntries(): void {
+    const entries: Array<{ key: string; timestamp: number }> = [];
+    
     try {
-      const keys = Object.keys(localStorage).filter(k => k.startsWith('cache:'));
-      const entries: Array<{ key: string; timestamp: number }> = [];
-      
+      const keys = Object.keys(localStorage).filter(key => 
+        key.startsWith(STORAGE_KEYS.CACHE)
+      );
+
       for (const key of keys) {
-        const data = localStorage.getItem(key);
-        if (data) {
+        const item = localStorage.getItem(key);
+        if (item) {
           try {
-            const entry = JSON.parse(data) as CacheEntry<any>;
+            const entry = JSON.parse(item) as CacheEntry<any>;
             entries.push({ key, timestamp: entry.timestamp });
           } catch {
             localStorage.removeItem(key);
           }
         }
       }
-      
+
       // Sort by timestamp and remove oldest half
       entries.sort((a, b) => a.timestamp - b.timestamp);
       const toRemove = Math.ceil(entries.length / 2);
@@ -338,10 +378,58 @@ export class CacheManager {
         localStorage.removeItem(entries[i].key);
       }
     } catch (error) {
-      console.warn('Failed to clear old localStorage entries:', error);
+      console.error('Failed to clear old localStorage entries:', error);
     }
+  }
+
+  /**
+   * Update statistics
+   */
+  private updateStats(): void {
+    this.stats.entries = this.memoryCache.size;
+    
+    if (this.useLocalStorage) {
+      try {
+        const keys = Object.keys(localStorage).filter(key => 
+          key.startsWith(STORAGE_KEYS.CACHE)
+        );
+        let totalSize = 0;
+        
+        for (const key of keys) {
+          const item = localStorage.getItem(key);
+          if (item) {
+            totalSize += item.length * 2; // Rough estimate (UTF-16)
+          }
+        }
+        
+        this.stats.storageSize = totalSize;
+      } catch {
+        this.stats.storageSize = 0;
+      }
+    }
+  }
+
+  /**
+   * Update hit rate
+   */
+  private updateHitRate(): void {
+    const total = this.stats.hits + this.stats.misses;
+    this.stats.hitRate = total > 0 ? this.stats.hits / total : 0;
+  }
+
+  /**
+   * Reset statistics
+   */
+  private resetStats(): void {
+    this.stats = {
+      hits: 0,
+      misses: 0,
+      entries: 0,
+      storageSize: 0,
+      hitRate: 0,
+    };
   }
 }
 
 // Export singleton instance
-export const cacheManager = CacheManager.getInstance();
+export const cacheManager = new CacheManager();
