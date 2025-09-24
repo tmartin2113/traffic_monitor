@@ -1,359 +1,397 @@
 /**
  * Date Utility Functions
- * Helper functions for date and time operations
+ * Utilities for date formatting and manipulation
  */
 
-import { 
-  format, 
-  formatDistanceToNow, 
-  parseISO, 
+import {
+  format,
+  formatDistance,
+  formatRelative,
+  parseISO,
+  isAfter,
+  isBefore,
+  isWithinInterval,
+  addMinutes,
+  addHours,
+  addDays,
+  subMinutes,
+  subHours,
+  subDays,
   differenceInMinutes,
   differenceInHours,
   differenceInDays,
-  isToday,
-  isYesterday,
-  isThisWeek,
   startOfDay,
   endOfDay,
   startOfWeek,
   endOfWeek,
-  addDays,
-  subDays,
-  isBefore,
-  isAfter,
-  isValid
+  isToday,
+  isYesterday,
+  isTomorrow,
+  isThisWeek,
+  isValid,
 } from 'date-fns';
+import { DATE_FORMATS } from './constants';
 
 /**
- * Format a date string to a readable format
+ * Format event time for display
  */
-export function formatDate(dateString: string, formatString: string = 'MMM d, yyyy'): string {
+export function formatEventTime(dateString: string | Date, formatType: keyof typeof DATE_FORMATS = 'SHORT'): string {
   try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return 'Invalid date';
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    
+    if (!isValid(date)) {
+      return 'Invalid date';
+    }
+
+    if (formatType === 'RELATIVE') {
+      return formatRelative(date, new Date());
+    }
+
+    const formatString = DATE_FORMATS[formatType];
     return format(date, formatString);
-  } catch {
+  } catch (error) {
+    console.error('Error formatting date:', error);
     return 'Invalid date';
   }
 }
 
 /**
- * Format a date with time
+ * Get relative time string
  */
-export function formatDateTime(dateString: string): string {
+export function getRelativeTime(dateString: string | Date): string {
   try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return 'Invalid date';
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
     
-    if (isToday(date)) {
-      return `Today at ${format(date, 'h:mm a')}`;
-    } else if (isYesterday(date)) {
-      return `Yesterday at ${format(date, 'h:mm a')}`;
-    } else if (isThisWeek(date)) {
-      return format(date, 'EEEE at h:mm a');
-    } else {
-      return format(date, 'MMM d, yyyy at h:mm a');
+    if (!isValid(date)) {
+      return 'Unknown';
     }
-  } catch {
-    return 'Invalid date';
+
+    return formatDistance(date, new Date(), { addSuffix: true });
+  } catch (error) {
+    console.error('Error getting relative time:', error);
+    return 'Unknown';
   }
 }
 
 /**
- * Get relative time from now
+ * Check if event is recent (within last 30 minutes)
  */
-export function getRelativeTime(dateString: string): string {
+export function isRecentEvent(dateString: string | Date, thresholdMinutes = 30): boolean {
   try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return 'Unknown time';
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
     
-    const now = new Date();
-    const diffMinutes = differenceInMinutes(now, date);
-    
-    if (diffMinutes < 1) {
-      return 'Just now';
-    } else if (diffMinutes < 60) {
-      return `${diffMinutes} min${diffMinutes > 1 ? 's' : ''} ago`;
-    } else if (diffMinutes < 1440) { // Less than 24 hours
-      const hours = Math.floor(diffMinutes / 60);
-      return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-    } else {
-      return formatDistanceToNow(date, { addSuffix: true });
+    if (!isValid(date)) {
+      return false;
     }
-  } catch {
-    return 'Unknown time';
-  }
-}
 
-/**
- * Get short relative time
- */
-export function getShortRelativeTime(dateString: string): string {
-  try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return 'N/A';
-    
-    const now = new Date();
-    const diffMinutes = differenceInMinutes(now, date);
-    const diffHours = differenceInHours(now, date);
-    const diffDays = differenceInDays(now, date);
-    
-    if (diffMinutes < 1) {
-      return 'now';
-    } else if (diffMinutes < 60) {
-      return `${diffMinutes}m`;
-    } else if (diffHours < 24) {
-      return `${diffHours}h`;
-    } else if (diffDays < 7) {
-      return `${diffDays}d`;
-    } else {
-      return format(date, 'MM/dd');
-    }
-  } catch {
-    return 'N/A';
-  }
-}
-
-/**
- * Check if date is recent (within threshold)
- */
-export function isRecent(dateString: string, thresholdMinutes: number = 30): boolean {
-  try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return false;
-    
-    const now = new Date();
-    return differenceInMinutes(now, date) <= thresholdMinutes;
-  } catch {
+    const threshold = subMinutes(new Date(), thresholdMinutes);
+    return isAfter(date, threshold);
+  } catch (error) {
+    console.error('Error checking if event is recent:', error);
     return false;
   }
 }
 
 /**
- * Check if date is stale (older than threshold)
+ * Check if event is stale (older than specified hours)
  */
-export function isStale(dateString: string, thresholdHours: number = 24): boolean {
+export function isStaleEvent(dateString: string | Date, thresholdHours = 24): boolean {
   try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return true;
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
     
-    const now = new Date();
-    return differenceInHours(now, date) > thresholdHours;
-  } catch {
+    if (!isValid(date)) {
+      return true;
+    }
+
+    const threshold = subHours(new Date(), thresholdHours);
+    return isBefore(date, threshold);
+  } catch (error) {
+    console.error('Error checking if event is stale:', error);
     return true;
   }
-}
-
-/**
- * Get date range for filtering
- */
-export interface DateRange {
-  start: Date;
-  end: Date;
-  label: string;
-}
-
-export function getPresetDateRanges(): DateRange[] {
-  const now = new Date();
-  
-  return [
-    {
-      start: subDays(startOfDay(now), 0),
-      end: endOfDay(now),
-      label: 'Today',
-    },
-    {
-      start: subDays(startOfDay(now), 1),
-      end: endOfDay(subDays(now, 1)),
-      label: 'Yesterday',
-    },
-    {
-      start: startOfWeek(now, { weekStartsOn: 1 }),
-      end: endOfWeek(now, { weekStartsOn: 1 }),
-      label: 'This Week',
-    },
-    {
-      start: subDays(now, 7),
-      end: now,
-      label: 'Last 7 Days',
-    },
-    {
-      start: subDays(now, 30),
-      end: now,
-      label: 'Last 30 Days',
-    },
-  ];
 }
 
 /**
  * Check if date is within range
  */
-export function isWithinDateRange(
-  dateString: string, 
-  range: { start?: Date; end?: Date }
+export function isDateInRange(
+  date: string | Date,
+  startDate: string | Date,
+  endDate: string | Date
 ): boolean {
   try {
-    const date = parseISO(dateString);
-    if (!isValid(date)) return false;
-    
-    if (range.start && isBefore(date, range.start)) {
+    const checkDate = typeof date === 'string' ? parseISO(date) : date;
+    const start = typeof startDate === 'string' ? parseISO(startDate) : startDate;
+    const end = typeof endDate === 'string' ? parseISO(endDate) : endDate;
+
+    if (!isValid(checkDate) || !isValid(start) || !isValid(end)) {
       return false;
     }
+
+    return isWithinInterval(checkDate, { start, end });
+  } catch (error) {
+    console.error('Error checking date range:', error);
+    return false;
+  }
+}
+
+/**
+ * Get time elapsed since date
+ */
+export function getTimeElapsed(dateString: string | Date): {
+  minutes: number;
+  hours: number;
+  days: number;
+  formatted: string;
+} {
+  try {
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
     
-    if (range.end && isAfter(date, range.end)) {
-      return false;
+    if (!isValid(date)) {
+      return { minutes: 0, hours: 0, days: 0, formatted: 'Unknown' };
     }
-    
-    return true;
+
+    const now = new Date();
+    const minutes = differenceInMinutes(now, date);
+    const hours = differenceInHours(now, date);
+    const days = differenceInDays(now, date);
+
+    let formatted: string;
+    if (minutes < 1) {
+      formatted = 'Just now';
+    } else if (minutes < 60) {
+      formatted = `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
+    } else if (hours < 24) {
+      formatted = `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+    } else {
+      formatted = `${days} day${days !== 1 ? 's' : ''} ago`;
+    }
+
+    return { minutes, hours, days, formatted };
+  } catch (error) {
+    console.error('Error getting time elapsed:', error);
+    return { minutes: 0, hours: 0, days: 0, formatted: 'Unknown' };
+  }
+}
+
+/**
+ * Parse schedule time string (e.g., "14:30")
+ */
+export function parseScheduleTime(timeString: string): { hours: number; minutes: number } | null {
+  const match = timeString.match(/^(\d{1,2}):(\d{2})$/);
+  
+  if (!match) {
+    return null;
+  }
+
+  const hours = parseInt(match[1], 10);
+  const minutes = parseInt(match[2], 10);
+
+  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null;
+  }
+
+  return { hours, minutes };
+}
+
+/**
+ * Format duration in milliseconds to human readable
+ */
+export function formatDuration(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) {
+    return `${days} day${days !== 1 ? 's' : ''}`;
+  }
+  if (hours > 0) {
+    return `${hours} hour${hours !== 1 ? 's' : ''}`;
+  }
+  if (minutes > 0) {
+    return `${minutes} minute${minutes !== 1 ? 's' : ''}`;
+  }
+  return `${seconds} second${seconds !== 1 ? 's' : ''}`;
+}
+
+/**
+ * Get date range presets
+ */
+export function getDateRangePresets() {
+  const now = new Date();
+  
+  return {
+    today: {
+      label: 'Today',
+      start: startOfDay(now),
+      end: endOfDay(now),
+    },
+    yesterday: {
+      label: 'Yesterday',
+      start: startOfDay(subDays(now, 1)),
+      end: endOfDay(subDays(now, 1)),
+    },
+    thisWeek: {
+      label: 'This Week',
+      start: startOfWeek(now),
+      end: endOfWeek(now),
+    },
+    last7Days: {
+      label: 'Last 7 Days',
+      start: startOfDay(subDays(now, 7)),
+      end: endOfDay(now),
+    },
+    last30Days: {
+      label: 'Last 30 Days',
+      start: startOfDay(subDays(now, 30)),
+      end: endOfDay(now),
+    },
+    custom: {
+      label: 'Custom Range',
+      start: null,
+      end: null,
+    },
+  };
+}
+
+/**
+ * Check if date string represents today
+ */
+export function isDateToday(dateString: string | Date): boolean {
+  try {
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    return isValid(date) && isToday(date);
   } catch {
     return false;
   }
 }
 
 /**
- * Format duration between two dates
+ * Check if date string represents yesterday
  */
-export function formatDuration(startDate: string, endDate?: string): string {
+export function isDateYesterday(dateString: string | Date): boolean {
   try {
-    const start = parseISO(startDate);
-    const end = endDate ? parseISO(endDate) : new Date();
-    
-    if (!isValid(start) || !isValid(end)) {
-      return 'Unknown duration';
-    }
-    
-    const diffMinutes = differenceInMinutes(end, start);
-    const diffHours = differenceInHours(end, start);
-    const diffDays = differenceInDays(end, start);
-    
-    if (diffMinutes < 60) {
-      return `${diffMinutes} minute${diffMinutes !== 1 ? 's' : ''}`;
-    } else if (diffHours < 24) {
-      return `${diffHours} hour${diffHours !== 1 ? 's' : ''}`;
-    } else {
-      return `${diffDays} day${diffDays !== 1 ? 's' : ''}`;
-    }
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    return isValid(date) && isYesterday(date);
   } catch {
-    return 'Unknown duration';
+    return false;
   }
 }
 
 /**
- * Parse schedule string (e.g., "Mon-Fri 9AM-5PM")
+ * Check if date string represents tomorrow
  */
-export interface Schedule {
-  days: string[];
-  startTime: string;
-  endTime: string;
+export function isDateTomorrow(dateString: string | Date): boolean {
+  try {
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    return isValid(date) && isTomorrow(date);
+  } catch {
+    return false;
+  }
 }
 
-export function parseScheduleString(schedule: string): Schedule | null {
+/**
+ * Check if date is this week
+ */
+export function isDateThisWeek(dateString: string | Date): boolean {
   try {
-    // Example: "Mon-Fri 9AM-5PM" or "Daily 10PM-6AM"
-    const match = schedule.match(/^([\w-]+)\s+(\d{1,2}(?::\d{2})?\s*[AP]M)-(\d{1,2}(?::\d{2})?\s*[AP]M)$/i);
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    return isValid(date) && isThisWeek(date);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get friendly date label
+ */
+export function getFriendlyDateLabel(dateString: string | Date): string {
+  try {
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
     
-    if (!match) return null;
-    
-    const [, daysStr, startTime, endTime] = match;
-    
-    let days: string[] = [];
-    
-    if (daysStr.toLowerCase() === 'daily') {
-      days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-    } else if (daysStr.includes('-')) {
-      // Parse range like "Mon-Fri"
-      const allDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-      const [startDay, endDay] = daysStr.split('-');
-      const startIndex = allDays.findIndex(d => d.startsWith(startDay.substring(0, 3)));
-      const endIndex = allDays.findIndex(d => d.startsWith(endDay.substring(0, 3)));
-      
-      if (startIndex >= 0 && endIndex >= 0) {
-        days = allDays.slice(startIndex, endIndex + 1);
-      }
-    } else {
-      // Single day or comma-separated days
-      days = daysStr.split(',').map(d => d.trim());
+    if (!isValid(date)) {
+      return 'Invalid date';
+    }
+
+    if (isToday(date)) {
+      return `Today at ${format(date, 'h:mm a')}`;
+    }
+    if (isYesterday(date)) {
+      return `Yesterday at ${format(date, 'h:mm a')}`;
+    }
+    if (isTomorrow(date)) {
+      return `Tomorrow at ${format(date, 'h:mm a')}`;
+    }
+    if (isThisWeek(date)) {
+      return format(date, "EEEE 'at' h:mm a");
     }
     
-    return {
-      days,
-      startTime: startTime.toUpperCase(),
-      endTime: endTime.toUpperCase(),
-    };
+    return format(date, 'MMM d, yyyy h:mm a');
+  } catch {
+    return 'Invalid date';
+  }
+}
+
+/**
+ * Calculate time until a future date
+ */
+export function getTimeUntil(dateString: string | Date): {
+  minutes: number;
+  hours: number;
+  days: number;
+  formatted: string;
+} | null {
+  try {
+    const date = typeof dateString === 'string' ? parseISO(dateString) : dateString;
+    
+    if (!isValid(date)) {
+      return null;
+    }
+
+    const now = new Date();
+    
+    if (isBefore(date, now)) {
+      return null; // Date is in the past
+    }
+
+    const minutes = differenceInMinutes(date, now);
+    const hours = differenceInHours(date, now);
+    const days = differenceInDays(date, now);
+
+    let formatted: string;
+    if (minutes < 1) {
+      formatted = 'Now';
+    } else if (minutes < 60) {
+      formatted = `In ${minutes} minute${minutes !== 1 ? 's' : ''}`;
+    } else if (hours < 24) {
+      formatted = `In ${hours} hour${hours !== 1 ? 's' : ''}`;
+    } else {
+      formatted = `In ${days} day${days !== 1 ? 's' : ''}`;
+    }
+
+    return { minutes, hours, days, formatted };
   } catch {
     return null;
   }
 }
 
 /**
- * Check if current time is within schedule
+ * Sort dates in ascending order
  */
-export function isWithinSchedule(schedule: Schedule): boolean {
-  const now = new Date();
-  const currentDay = format(now, 'EEE');
-  
-  if (!schedule.days.includes(currentDay)) {
-    return false;
-  }
-  
-  // Parse times
-  const currentTime = format(now, 'h:mm A');
-  const parseTime = (timeStr: string): number => {
-    const [time, period] = timeStr.split(' ');
-    const [hours, minutes = '0'] = time.split(':').map(Number);
-    let totalMinutes = hours * 60 + Number(minutes);
-    
-    if (period === 'PM' && hours !== 12) {
-      totalMinutes += 12 * 60;
-    }
-    if (period === 'AM' && hours === 12) {
-      totalMinutes -= 12 * 60;
-    }
-    
-    return totalMinutes;
-  };
-  
-  const current = parseTime(currentTime);
-  const start = parseTime(schedule.startTime);
-  const end = parseTime(schedule.endTime);
-  
-  // Handle overnight schedules
-  if (end < start) {
-    return current >= start || current <= end;
-  }
-  
-  return current >= start && current <= end;
+export function sortDatesAscending(dates: (string | Date)[]): Date[] {
+  return dates
+    .map(d => typeof d === 'string' ? parseISO(d) : d)
+    .filter(d => isValid(d))
+    .sort((a, b) => a.getTime() - b.getTime());
 }
 
 /**
- * Group events by time period
+ * Sort dates in descending order
  */
-export function groupEventsByTimePeriod<T extends { updated: string }>(
-  events: T[]
-): Map<string, T[]> {
-  const groups = new Map<string, T[]>();
-  
-  events.forEach(event => {
-    const date = parseISO(event.updated);
-    if (!isValid(date)) return;
-    
-    let period: string;
-    
-    if (isToday(date)) {
-      period = 'Today';
-    } else if (isYesterday(date)) {
-      period = 'Yesterday';
-    } else if (isThisWeek(date)) {
-      period = 'This Week';
-    } else {
-      period = format(date, 'MMMM yyyy');
-    }
-    
-    if (!groups.has(period)) {
-      groups.set(period, []);
-    }
-    groups.get(period)!.push(event);
-  });
-  
-  return groups;
+export function sortDatesDescending(dates: (string | Date)[]): Date[] {
+  return dates
+    .map(d => typeof d === 'string' ? parseISO(d) : d)
+    .filter(d => isValid(d))
+    .sort((a, b) => b.getTime() - a.getTime());
 }
