@@ -1,16 +1,17 @@
 /**
  * useLocalStorage Hook
- * Persistent state management with localStorage
+ * Manages state persistence in localStorage with TypeScript support
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
-type SetValue<T> = T | ((val: T) => T);
+type SetValue<T> = T | ((prevValue: T) => T);
 
 interface UseLocalStorageOptions {
   serializer?: (value: any) => string;
   deserializer?: (value: string) => any;
-  syncAcrossTabs?: boolean;
+  syncData?: boolean;
+  initializeFromStorage?: boolean;
 }
 
 /**
@@ -18,129 +19,105 @@ interface UseLocalStorageOptions {
  */
 export function useLocalStorage<T>(
   key: string,
-  initialValue: T,
+  defaultValue: T,
   options: UseLocalStorageOptions = {}
 ): [T, (value: SetValue<T>) => void, () => void] {
   const {
     serializer = JSON.stringify,
     deserializer = JSON.parse,
-    syncAcrossTabs = true
+    syncData = true,
+    initializeFromStorage = true,
   } = options;
 
-  // Get from local storage then parse stored json or return initialValue
-  const readValue = useCallback((): T => {
-    // Prevent build error "window is undefined" but keeps working
-    if (typeof window === 'undefined') {
-      return initialValue;
+  const isFirstRender = useRef(true);
+
+  // Initialize state with value from localStorage or default
+  const [storedValue, setStoredValue] = useState<T>(() => {
+    if (!initializeFromStorage) {
+      return defaultValue;
     }
 
     try {
       const item = window.localStorage.getItem(key);
-      return item ? deserializer(item) : initialValue;
-    } catch (error) {
-      console.warn(`Error reading localStorage key "${key}":`, error);
-      return initialValue;
-    }
-  }, [initialValue, key, deserializer]);
-
-  // State to store our value
-  const [storedValue, setStoredValue] = useState<T>(readValue);
-
-  // Return a wrapped version of useState's setter function that persists the new value to localStorage
-  const setValue = useCallback(
-    (value: SetValue<T>) => {
-      // Prevent build error "window is undefined" but keeps working
-      if (typeof window === 'undefined') {
-        console.warn(
-          `Tried setting localStorage key "${key}" even though environment is not a browser`
-        );
+      
+      if (item === null) {
+        return defaultValue;
       }
+
+      return deserializer(item);
+    } catch (error) {
+      console.error(`Error reading localStorage key "${key}":`, error);
+      return defaultValue;
+    }
+  });
+
+  // Update localStorage when state changes
+  useEffect(() => {
+    // Skip the first render if we initialized from storage
+    if (isFirstRender.current && initializeFromStorage) {
+      isFirstRender.current = false;
+      return;
+    }
+
+    try {
+      if (storedValue === undefined) {
+        window.localStorage.removeItem(key);
+      } else {
+        window.localStorage.setItem(key, serializer(storedValue));
+      }
+    } catch (error) {
+      console.error(`Error setting localStorage key "${key}":`, error);
+    }
+  }, [key, storedValue, serializer]);
+
+  // Handle storage events for cross-tab synchronization
+  useEffect(() => {
+    if (!syncData) return;
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key !== key || e.storageArea !== localStorage) return;
 
       try {
-        // Allow value to be a function so we have the same API as useState
-        const newValue = value instanceof Function ? value(storedValue) : value;
-
-        // Save to local storage
-        window.localStorage.setItem(key, serializer(newValue));
-
-        // Save state
-        setStoredValue(newValue);
-
-        // Dispatch a custom event so other tabs can sync
-        if (syncAcrossTabs) {
-          window.dispatchEvent(
-            new CustomEvent('local-storage', {
-              detail: {
-                key,
-                value: newValue
-              }
-            })
-          );
+        if (e.newValue === null) {
+          setStoredValue(defaultValue);
+        } else {
+          const newValue = deserializer(e.newValue);
+          setStoredValue(newValue);
         }
       } catch (error) {
-        console.warn(`Error setting localStorage key "${key}":`, error);
+        console.error(`Error syncing localStorage key "${key}":`, error);
+      }
+    };
+
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, [key, defaultValue, deserializer, syncData]);
+
+  // Set value function
+  const setValue = useCallback(
+    (value: SetValue<T>) => {
+      try {
+        // Allow value to be a function
+        setStoredValue(prevValue => {
+          const valueToStore = value instanceof Function ? value(prevValue) : value;
+          return valueToStore;
+        });
+      } catch (error) {
+        console.error(`Error updating localStorage key "${key}":`, error);
       }
     },
-    [key, serializer, storedValue, syncAcrossTabs]
+    [key]
   );
 
-  // Remove value from localStorage
+  // Remove value function
   const removeValue = useCallback(() => {
     try {
       window.localStorage.removeItem(key);
-      setStoredValue(initialValue);
-      
-      if (syncAcrossTabs) {
-        window.dispatchEvent(
-          new CustomEvent('local-storage', {
-            detail: {
-              key,
-              value: null
-            }
-          })
-        );
-      }
+      setStoredValue(defaultValue);
     } catch (error) {
-      console.warn(`Error removing localStorage key "${key}":`, error);
+      console.error(`Error removing localStorage key "${key}":`, error);
     }
-  }, [key, initialValue, syncAcrossTabs]);
-
-  useEffect(() => {
-    setStoredValue(readValue());
-  }, [readValue]);
-
-  // Listen for changes to this key in other tabs
-  useEffect(() => {
-    if (!syncAcrossTabs) return;
-
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === key && e.newValue !== null) {
-        try {
-          setStoredValue(deserializer(e.newValue));
-        } catch (error) {
-          console.warn(`Error syncing localStorage key "${key}":`, error);
-        }
-      }
-    };
-
-    const handleCustomEvent = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      if (customEvent.detail.key === key) {
-        setStoredValue(customEvent.detail.value);
-      }
-    };
-
-    // this only works for other tabs, not the current one
-    window.addEventListener('storage', handleStorageChange);
-    
-    // this works for the current tab
-    window.addEventListener('local-storage', handleCustomEvent);
-
-    return () => {
-      window.removeEventListener('storage', handleStorageChange);
-      window.removeEventListener('local-storage', handleCustomEvent);
-    };
-  }, [key, deserializer, syncAcrossTabs]);
+  }, [key, defaultValue]);
 
   return [storedValue, setValue, removeValue];
 }
@@ -148,74 +125,132 @@ export function useLocalStorage<T>(
 /**
  * Hook for managing multiple localStorage keys
  */
-export function useLocalStorageManager() {
-  const getAllKeys = useCallback(() => {
-    if (typeof window === 'undefined') return [];
-    
-    const keys: string[] = [];
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (key) keys.push(key);
+export function useLocalStorageMultiple<T extends Record<string, any>>(
+  keys: Record<keyof T, any>,
+  options: UseLocalStorageOptions = {}
+): {
+  values: T;
+  setValue: (key: keyof T, value: any) => void;
+  setValues: (values: Partial<T>) => void;
+  removeValue: (key: keyof T) => void;
+  clearAll: () => void;
+} {
+  const storageHooks = {} as Record<keyof T, ReturnType<typeof useLocalStorage>>;
+
+  // Create individual hooks for each key
+  Object.entries(keys).forEach(([k, defaultValue]) => {
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    storageHooks[k as keyof T] = useLocalStorage(k, defaultValue, options);
+  });
+
+  // Aggregate values
+  const values = Object.entries(storageHooks).reduce((acc, [k, [value]]) => {
+    acc[k as keyof T] = value;
+    return acc;
+  }, {} as T);
+
+  // Set individual value
+  const setValue = useCallback((key: keyof T, value: any) => {
+    if (storageHooks[key]) {
+      const [, setter] = storageHooks[key];
+      setter(value);
     }
-    return keys;
-  }, []);
+  }, [storageHooks]);
 
-  const clearAll = useCallback(() => {
-    if (typeof window === 'undefined') return;
-    
-    window.localStorage.clear();
-    window.dispatchEvent(new Event('local-storage-clear'));
-  }, []);
-
-  const getSize = useCallback(() => {
-    if (typeof window === 'undefined') return 0;
-    
-    let size = 0;
-    for (const key in window.localStorage) {
-      if (window.localStorage.hasOwnProperty(key)) {
-        size += window.localStorage[key].length + key.length;
-      }
-    }
-    return size;
-  }, []);
-
-  const exportData = useCallback(() => {
-    if (typeof window === 'undefined') return {};
-    
-    const data: Record<string, any> = {};
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const key = window.localStorage.key(i);
-      if (key) {
-        try {
-          data[key] = JSON.parse(window.localStorage.getItem(key) || '');
-        } catch {
-          data[key] = window.localStorage.getItem(key);
-        }
-      }
-    }
-    return data;
-  }, []);
-
-  const importData = useCallback((data: Record<string, any>) => {
-    if (typeof window === 'undefined') return;
-    
-    Object.entries(data).forEach(([key, value]) => {
-      try {
-        const serialized = typeof value === 'string' ? value : JSON.stringify(value);
-        window.localStorage.setItem(key, serialized);
-      } catch (error) {
-        console.warn(`Error importing localStorage key "${key}":`, error);
-      }
+  // Set multiple values
+  const setValues = useCallback((newValues: Partial<T>) => {
+    Object.entries(newValues).forEach(([k, v]) => {
+      setValue(k as keyof T, v);
     });
-    
-    window.dispatchEvent(new Event('local-storage-import'));
-  }, []);
+  }, [setValue]);
+
+  // Remove individual value
+  const removeValue = useCallback((key: keyof T) => {
+    if (storageHooks[key]) {
+      const [, , remover] = storageHooks[key];
+      remover();
+    }
+  }, [storageHooks]);
+
+  // Clear all values
+  const clearAll = useCallback(() => {
+    Object.keys(storageHooks).forEach(k => {
+      removeValue(k as keyof T);
+    });
+  }, [storageHooks, removeValue]);
 
   return {
-    getAllKeys,
+    values,
+    setValue,
+    setValues,
+    removeValue,
     clearAll,
-    getSize,
-    exportData,
-    importData
   };
+}
+
+/**
+ * Hook for checking localStorage availability
+ */
+export function useLocalStorageAvailable(): boolean {
+  const [isAvailable, setIsAvailable] = useState(false);
+
+  useEffect(() => {
+    try {
+      const testKey = '__localStorage_test__';
+      window.localStorage.setItem(testKey, 'test');
+      window.localStorage.removeItem(testKey);
+      setIsAvailable(true);
+    } catch {
+      setIsAvailable(false);
+    }
+  }, []);
+
+  return isAvailable;
+}
+
+/**
+ * Hook for getting localStorage size
+ */
+export function useLocalStorageSize(): { used: number; total: number; percentage: number } {
+  const [size, setSize] = useState({ used: 0, total: 0, percentage: 0 });
+
+  useEffect(() => {
+    const calculateSize = () => {
+      try {
+        let usedSpace = 0;
+        
+        // Calculate used space (rough estimate)
+        for (const key in localStorage) {
+          if (localStorage.hasOwnProperty(key)) {
+            const item = localStorage.getItem(key);
+            if (item) {
+              usedSpace += key.length + item.length;
+            }
+          }
+        }
+
+        // Most browsers have 5-10MB limit
+        const totalSpace = 5 * 1024 * 1024; // 5MB in bytes
+        const percentage = (usedSpace / totalSpace) * 100;
+
+        setSize({
+          used: usedSpace,
+          total: totalSpace,
+          percentage: Math.min(percentage, 100),
+        });
+      } catch (error) {
+        console.error('Error calculating localStorage size:', error);
+      }
+    };
+
+    calculateSize();
+    
+    // Recalculate on storage events
+    const handleStorage = () => calculateSize();
+    window.addEventListener('storage', handleStorage);
+    
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  return size;
 }
