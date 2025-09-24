@@ -1,1 +1,120 @@
-
+{
+  "name": "511-bay-area-traffic-monitor",
+  "version": "1.0.0",
+  "description": "Real-time traffic monitoring application for San Francisco Bay Area using 511.org API",
+  "author": "Your Organization",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "eslint . --ext ts,tsx --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,js,jsx,json,css,md}\"",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage",
+    "test:run": "vitest run",
+    "clean": "rm -rf dist node_modules .cache",
+    "analyze": "vite-bundle-visualizer",
+    "prepare": "husky install",
+    "pre-commit": "lint-staged"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@tanstack/react-query": "^5.51.0",
+    "@tanstack/react-query-devtools": "^5.51.0",
+    "leaflet": "^1.9.4",
+    "leaflet.markercluster": "^1.5.3",
+    "react-leaflet": "^4.2.1",
+    "@react-leaflet/cluster": "^2.1.0",
+    "axios": "^1.7.2",
+    "zustand": "^4.5.4",
+    "zod": "^3.23.8",
+    "date-fns": "^3.6.0",
+    "clsx": "^2.1.1",
+    "react-hot-toast": "^2.4.1",
+    "lucide-react": "^0.403.0",
+    "lodash-es": "^4.17.21"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/node": "^20.14.10",
+    "@types/leaflet": "^1.9.12",
+    "@types/leaflet.markercluster": "^1.5.4",
+    "@types/lodash-es": "^4.17.12",
+    "@typescript-eslint/eslint-plugin": "^7.15.0",
+    "@typescript-eslint/parser": "^7.15.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "eslint-plugin-react-refresh": "^0.4.7",
+    "eslint-plugin-react": "^7.34.3",
+    "prettier": "^3.3.2",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3",
+    "vitest": "^1.6.0",
+    "@vitest/ui": "^1.6.0",
+    "@testing-library/react": "^15.0.7",
+    "@testing-library/jest-dom": "^6.4.6",
+    "@testing-library/user-event": "^14.5.2",
+    "jsdom": "^24.1.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "tailwindcss": "^3.4.4",
+    "postcss": "^8.4.39",
+    "autoprefixer": "^10.4.19",
+    "cssnano": "^7.0.4",
+    "@tailwindcss/forms": "^0.5.7",
+    "@tailwindcss/typography": "^0.5.13",
+    "@tailwindcss/aspect-ratio": "^0.4.2",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.7",
+    "vite-bundle-visualizer": "^1.2.1"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{js,jsx,json,css,md}": [
+      "prettier --write"
+    ]
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/511-traffic-monitor.git"
+  },
+  "keywords": [
+    "traffic",
+    "monitoring",
+    "511",
+    "bay-area",
+    "real-time",
+    "map",
+    "react",
+    "typescript",
+    "leaflet"
+  ]
+}
