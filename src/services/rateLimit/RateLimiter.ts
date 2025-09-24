@@ -3,174 +3,339 @@
  * Implements token bucket algorithm for API rate limiting
  */
 
-import { RATE_LIMIT_CONFIG } from '@utils/constants';
+import { RATE_LIMIT_CONFIG, STORAGE_KEYS } from '@/utils/constants';
 
-export interface RateLimitInfo {
+interface RateLimitInfo {
   remaining: number;
+  total: number;
   resetTime: number | null;
   isLimited: boolean;
-  nextAvailableTime: number | null;
+  percentageUsed: number;
+  timeUntilReset: number | null;
+}
+
+interface RateLimitState {
+  requests: number[];
+  lastReset: number;
+  violations: number;
 }
 
 export class RateLimiter {
   private maxRequests: number;
   private windowMs: number;
-  private requests: number[] = [];
-  private static instance: RateLimiter | null = null;
+  private requests: number[];
+  private lastReset: number;
+  private violations: number;
+  private warningThreshold: number;
+  private persistToStorage: boolean;
+  private storageKey: string;
 
   constructor(
-    maxRequests: number = RATE_LIMIT_CONFIG.MAX_REQUESTS_PER_HOUR,
-    windowMs: number = RATE_LIMIT_CONFIG.WINDOW_MS
+    maxRequests = RATE_LIMIT_CONFIG.MAX_REQUESTS,
+    windowMs = RATE_LIMIT_CONFIG.WINDOW_MS,
+    persistToStorage = true
   ) {
     this.maxRequests = maxRequests;
     this.windowMs = windowMs;
-    this.loadState();
-  }
+    this.requests = [];
+    this.lastReset = Date.now();
+    this.violations = 0;
+    this.warningThreshold = RATE_LIMIT_CONFIG.WARNING_THRESHOLD;
+    this.persistToStorage = persistToStorage && this.isStorageAvailable();
+    this.storageKey = STORAGE_KEYS.RATE_LIMIT;
 
-  /**
-   * Get singleton instance
-   */
-  static getInstance(): RateLimiter {
-    if (!RateLimiter.instance) {
-      RateLimiter.instance = new RateLimiter();
+    // Load state from storage
+    if (this.persistToStorage) {
+      this.loadState();
     }
-    return RateLimiter.instance;
+
+    // Set up periodic cleanup
+    this.startCleanupInterval();
   }
 
   /**
-   * Check if a request can be made
+   * Check if request can be made
    */
   canMakeRequest(): boolean {
-    this.pruneOldRequests();
+    this.cleanup();
     return this.requests.length < this.maxRequests;
   }
 
   /**
-   * Record a new request
+   * Track a request
    */
-  recordRequest(): void {
+  trackRequest(): boolean {
+    this.cleanup();
+
+    if (this.requests.length >= this.maxRequests) {
+      this.violations++;
+      this.saveState();
+      return false;
+    }
+
     const now = Date.now();
     this.requests.push(now);
     this.saveState();
+    return true;
   }
 
   /**
-   * Get detailed rate limit information
+   * Get rate limit information
    */
   getInfo(): RateLimitInfo {
-    this.pruneOldRequests();
-    
+    this.cleanup();
+
     const remaining = Math.max(0, this.maxRequests - this.requests.length);
+    const percentageUsed = (this.requests.length / this.maxRequests) * 100;
     const resetTime = this.getResetTime();
-    const isLimited = remaining === 0;
-    const nextAvailableTime = isLimited ? resetTime : null;
+    const timeUntilReset = resetTime ? resetTime - Date.now() : null;
 
     return {
       remaining,
+      total: this.maxRequests,
       resetTime,
-      isLimited,
-      nextAvailableTime,
+      isLimited: remaining === 0,
+      percentageUsed,
+      timeUntilReset: timeUntilReset && timeUntilReset > 0 ? timeUntilReset : null,
     };
   }
 
   /**
-   * Get the time when the rate limit resets
+   * Get remaining requests
+   */
+  getRemainingRequests(): number {
+    this.cleanup();
+    return Math.max(0, this.maxRequests - this.requests.length);
+  }
+
+  /**
+   * Check if rate limit is exceeded
+   */
+  isRateLimited(): boolean {
+    this.cleanup();
+    return this.requests.length >= this.maxRequests;
+  }
+
+  /**
+   * Check if warning threshold reached
+   */
+  isWarningThreshold(): boolean {
+    const remaining = this.getRemainingRequests();
+    return remaining <= this.warningThreshold && remaining > 0;
+  }
+
+  /**
+   * Get reset time
    */
   getResetTime(): number | null {
-    if (this.requests.length === 0) return null;
-    
+    if (this.requests.length === 0) {
+      return null;
+    }
+
     const oldestRequest = Math.min(...this.requests);
     return oldestRequest + this.windowMs;
   }
 
   /**
-   * Get remaining requests count
+   * Set reset time (for server-provided reset times)
    */
-  getRemainingRequests(): number {
-    this.pruneOldRequests();
-    return Math.max(0, this.maxRequests - this.requests.length);
-  }
-
-  /**
-   * Wait until a request can be made
-   */
-  async waitForAvailability(): Promise<void> {
-    while (!this.canMakeRequest()) {
-      const resetTime = this.getResetTime();
-      if (resetTime) {
-        const waitTime = Math.max(0, resetTime - Date.now() + 1000);
-        await new Promise(resolve => setTimeout(resolve, Math.min(waitTime, 5000)));
-      } else {
-        break;
-      }
+  setResetTime(resetTime: number): void {
+    // Adjust internal state based on server reset time
+    const now = Date.now();
+    
+    if (resetTime > now) {
+      // Block all requests until reset time
+      this.requests = Array(this.maxRequests).fill(now);
+      this.saveState();
     }
   }
 
   /**
-   * Reset the rate limiter
+   * Reset rate limit
    */
   reset(): void {
     this.requests = [];
+    this.lastReset = Date.now();
+    this.violations = 0;
     this.saveState();
   }
 
   /**
-   * Remove requests outside the time window
+   * Clean up expired requests
    */
-  private pruneOldRequests(): void {
+  private cleanup(): void {
     const now = Date.now();
     const cutoff = now - this.windowMs;
-    this.requests = this.requests.filter(time => time > cutoff);
+    
+    // Remove requests outside the window
+    this.requests = this.requests.filter(timestamp => timestamp > cutoff);
+    
+    // Reset violations counter if window has passed
+    if (now - this.lastReset > this.windowMs) {
+      this.violations = 0;
+      this.lastReset = now;
+    }
   }
 
   /**
-   * Save state to localStorage
+   * Start cleanup interval
+   */
+  private startCleanupInterval(): void {
+    // Clean up every 10 seconds
+    setInterval(() => {
+      this.cleanup();
+      this.saveState();
+    }, 10000);
+  }
+
+  /**
+   * Check if storage is available
+   */
+  private isStorageAvailable(): boolean {
+    try {
+      const test = '__rate_limit_test__';
+      localStorage.setItem(test, test);
+      localStorage.removeItem(test);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Save state to storage
    */
   private saveState(): void {
+    if (!this.persistToStorage) return;
+
     try {
-      localStorage.setItem('rate_limiter_requests', JSON.stringify(this.requests));
+      const state: RateLimitState = {
+        requests: this.requests,
+        lastReset: this.lastReset,
+        violations: this.violations,
+      };
+
+      localStorage.setItem(this.storageKey, JSON.stringify(state));
     } catch (error) {
-      console.warn('Failed to save rate limiter state:', error);
+      console.error('Failed to save rate limit state:', error);
     }
   }
 
   /**
-   * Load state from localStorage
+   * Load state from storage
    */
   private loadState(): void {
+    if (!this.persistToStorage) return;
+
     try {
-      const saved = localStorage.getItem('rate_limiter_requests');
-      if (saved) {
-        this.requests = JSON.parse(saved);
-        this.pruneOldRequests();
+      const stored = localStorage.getItem(this.storageKey);
+      
+      if (stored) {
+        const state: RateLimitState = JSON.parse(stored);
+        
+        // Validate and restore state
+        if (Array.isArray(state.requests)) {
+          this.requests = state.requests;
+          this.lastReset = state.lastReset || Date.now();
+          this.violations = state.violations || 0;
+          
+          // Clean up old requests
+          this.cleanup();
+        }
       }
     } catch (error) {
-      console.warn('Failed to load rate limiter state:', error);
-      this.requests = [];
+      console.error('Failed to load rate limit state:', error);
+      this.reset();
     }
+  }
+
+  /**
+   * Get violation count
+   */
+  getViolationCount(): number {
+    return this.violations;
   }
 
   /**
    * Get formatted time until reset
    */
   getFormattedTimeUntilReset(): string {
-    const resetTime = this.getResetTime();
-    if (!resetTime) return 'No limit';
-
-    const now = Date.now();
-    const diff = resetTime - now;
+    const info = this.getInfo();
     
-    if (diff <= 0) return 'Resetting...';
-
-    const minutes = Math.floor(diff / 60000);
-    const seconds = Math.floor((diff % 60000) / 1000);
-
-    if (minutes > 0) {
-      return `${minutes}m ${seconds}s`;
+    if (!info.timeUntilReset) {
+      return 'Ready';
     }
-    return `${seconds}s`;
+
+    const seconds = Math.ceil(info.timeUntilReset / 1000);
+    
+    if (seconds < 60) {
+      return `${seconds}s`;
+    }
+
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+
+    if (minutes < 60) {
+      return remainingSeconds > 0 
+        ? `${minutes}m ${remainingSeconds}s`
+        : `${minutes}m`;
+    }
+
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+
+    return remainingMinutes > 0
+      ? `${hours}h ${remainingMinutes}m`
+      : `${hours}h`;
+  }
+
+  /**
+   * Update configuration
+   */
+  updateConfig(maxRequests?: number, windowMs?: number): void {
+    if (maxRequests !== undefined && maxRequests > 0) {
+      this.maxRequests = maxRequests;
+    }
+
+    if (windowMs !== undefined && windowMs > 0) {
+      this.windowMs = windowMs;
+    }
+
+    this.cleanup();
+    this.saveState();
+  }
+
+  /**
+   * Get statistics
+   */
+  getStatistics() {
+    this.cleanup();
+
+    const info = this.getInfo();
+    const requestsInLastMinute = this.requests.filter(
+      t => t > Date.now() - 60000
+    ).length;
+
+    const requestsInLastHour = this.requests.filter(
+      t => t > Date.now() - 3600000
+    ).length;
+
+    return {
+      current: this.requests.length,
+      remaining: info.remaining,
+      total: this.maxRequests,
+      percentageUsed: info.percentageUsed,
+      violations: this.violations,
+      isLimited: info.isLimited,
+      isWarning: this.isWarningThreshold(),
+      resetTime: info.resetTime,
+      formattedResetTime: this.getFormattedTimeUntilReset(),
+      requestsInLastMinute,
+      requestsInLastHour,
+      averageRequestsPerMinute: requestsInLastHour / 60,
+    };
   }
 }
 
 // Export singleton instance
-export const rateLimiter = RateLimiter.getInstance();
+export const rateLimiter = new RateLimiter();
