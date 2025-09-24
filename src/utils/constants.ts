@@ -1,31 +1,32 @@
 /**
- * Application Constants
- * Central configuration for the 511 Bay Area Traffic Monitor
+ * Application Constants and Configuration
+ * Central location for all application constants
  */
+
+import { EventType, EventSeverity } from '@/types/api.types';
 
 // API Configuration
 export const API_CONFIG = {
-  BASE_URL: import.meta.env.VITE_API_BASE_URL || 'https://api.511.org',
-  DEFAULT_API_KEY: import.meta.env.VITE_511_API_KEY || '',
-  ENDPOINTS: {
-    TRAFFIC_EVENTS: '/traffic/events',
-    WZDX: '/traffic/wzdx',
-  },
+  BASE_URL: 'https://api.511.org',
+  WZDX_URL: 'https://api.511.org/traffic/wzdx',
+  TIMEOUT: 30000,
+  RETRY_COUNT: 3,
+  RETRY_DELAY: 1000,
+  MAX_EVENTS: 500,
 } as const;
 
 // Rate Limiting Configuration
 export const RATE_LIMIT_CONFIG = {
-  MAX_REQUESTS_PER_HOUR: 60,
-  WINDOW_MS: 3600000, // 1 hour in milliseconds
-  RETRY_DELAY_MS: 5000, // 5 seconds
-  MAX_RETRIES: 3,
+  MAX_REQUESTS: 60,
+  WINDOW_MS: 3600000, // 1 hour
+  WARNING_THRESHOLD: 10, // Show warning when less than 10 requests remaining
 } as const;
 
 // Cache Configuration
 export const CACHE_CONFIG = {
-  DEFAULT_TTL_MS: 30000, // 30 seconds
-  MAX_CACHE_SIZE: 50, // Maximum number of cached entries
-  STALE_WHILE_REVALIDATE_MS: 60000, // 1 minute
+  DEFAULT_TTL: 30000, // 30 seconds
+  MAX_CACHE_SIZE: 100, // Maximum number of cache entries
+  STORAGE_KEY: '511_traffic_cache',
 } as const;
 
 // Polling Configuration
@@ -33,198 +34,300 @@ export const POLLING_CONFIG = {
   DEFAULT_INTERVAL_MS: 60000, // 1 minute
   MIN_INTERVAL_MS: 30000, // 30 seconds
   MAX_INTERVAL_MS: 300000, // 5 minutes
-  BACKGROUND_INTERVAL_MS: 120000, // 2 minutes when tab is not active
+  BACKGROUND_INTERVAL_MS: 300000, // 5 minutes when tab is not active
 } as const;
 
 // Map Configuration
 export const MAP_CONFIG = {
   DEFAULT_CENTER: {
-    lat: 37.5,
-    lng: -122.1,
+    lat: 37.7749,
+    lng: -122.4194,
   },
   DEFAULT_ZOOM: 10,
-  MIN_ZOOM: 9,
+  MIN_ZOOM: 8,
   MAX_ZOOM: 18,
   TILE_LAYER: {
     URL: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     ATTRIBUTION: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
   },
   CLUSTER_OPTIONS: {
-    maxClusterRadius: 50,
-    spiderfyOnMaxZoom: true,
     showCoverageOnHover: false,
     zoomToBoundsOnClick: true,
+    spiderfyOnMaxZoom: true,
+    maxClusterRadius: 60,
+    iconCreateFunction: (cluster: any) => {
+      const count = cluster.getChildCount();
+      let size = 'small';
+      if (count > 10) size = 'medium';
+      if (count > 25) size = 'large';
+      
+      return L.divIcon({
+        html: `<div><span>${count}</span></div>`,
+        className: `marker-cluster marker-cluster-${size}`,
+        iconSize: L.point(40, 40),
+      });
+    },
   },
 } as const;
 
-// Bay Area Geofence
+// Geofence Configuration (Bay Area boundaries)
 export const GEOFENCE = {
   BBOX: {
-    xmin: -122.57031250,
-    ymin: 37.21559028,
-    xmax: -121.66525694,
-    ymax: 37.86217361,
+    xmin: -122.8,
+    ymin: 37.2,
+    xmax: -121.5,
+    ymax: 38.0,
+  },
+  CENTER: {
+    lat: 37.6,
+    lng: -122.15,
   },
   POLYGON: [
-    [-122.57031250, 37.78765972],
-    [-122.15529861, 37.86217361],
-    [-121.66525694, 37.29010417],
-    [-122.08027083, 37.21559028],
-    [-122.57031250, 37.78765972],
+    [38.0, -122.8],
+    [38.0, -121.5],
+    [37.2, -121.5],
+    [37.2, -122.8],
+    [38.0, -122.8],
   ],
   STYLE: {
-    color: '#3b82f6',
+    color: '#3B82F6',
     weight: 2,
-    opacity: 0.3,
+    opacity: 0.8,
+    fillColor: '#3B82F6',
     fillOpacity: 0.05,
-    dashArray: '10, 10',
+    dashArray: '5, 5',
   },
 } as const;
 
 // Event Type Configuration
 export const EVENT_TYPE_CONFIG = {
-  CONSTRUCTION: {
+  [EventType.CONSTRUCTION]: {
     icon: '🚧',
     label: 'Construction',
-    baseColor: '#f59e0b',
+    color: '#F59E0B',
+    baseColor: '#FCD34D',
+    priority: 2,
   },
-  INCIDENT: {
+  [EventType.INCIDENT]: {
     icon: '⚠️',
     label: 'Incident',
-    baseColor: '#dc2626',
+    color: '#DC2626',
+    baseColor: '#F87171',
+    priority: 1,
   },
-  SPECIAL_EVENT: {
+  [EventType.SPECIAL_EVENT]: {
     icon: '📍',
     label: 'Special Event',
-    baseColor: '#8b5cf6',
+    color: '#8B5CF6',
+    baseColor: '#A78BFA',
+    priority: 3,
   },
-  ROAD_CONDITION: {
+  [EventType.ROAD_CONDITION]: {
     icon: '🛣️',
     label: 'Road Condition',
-    baseColor: '#0ea5e9',
+    color: '#0EA5E9',
+    baseColor: '#38BDF8',
+    priority: 4,
   },
-  WEATHER_CONDITION: {
+  [EventType.WEATHER_CONDITION]: {
     icon: '🌧️',
     label: 'Weather',
-    baseColor: '#06b6d4',
+    color: '#06B6D4',
+    baseColor: '#22D3EE',
+    priority: 5,
   },
 } as const;
 
 // Severity Configuration
 export const SEVERITY_CONFIG = {
-  SEVERE: {
+  [EventSeverity.SEVERE]: {
     label: 'Severe',
-    color: '#dc2626',
-    priority: 1,
-  },
-  MAJOR: {
-    label: 'Major',
-    color: '#ea580c',
-    priority: 2,
-  },
-  MODERATE: {
-    label: 'Moderate',
-    color: '#f59e0b',
-    priority: 3,
-  },
-  MINOR: {
-    label: 'Minor',
-    color: '#3b82f6',
-    priority: 4,
-  },
-  UNKNOWN: {
-    label: 'Unknown',
-    color: '#6b7280',
-    priority: 5,
-  },
-} as const;
-
-// Closure Polyline Styles
-export const CLOSURE_STYLES = {
-  FULL_CLOSURE: {
-    color: '#dc2626',
-    weight: 5,
-    opacity: 0.9,
-    dashArray: null,
-  },
-  PARTIAL_CLOSURE: {
-    color: '#ea580c',
+    color: '#DC2626',
     weight: 4,
-    opacity: 0.8,
-    dashArray: '10, 5',
+    icon: '🔴',
   },
-  SINGLE_LANE: {
-    color: '#f59e0b',
+  [EventSeverity.MAJOR]: {
+    label: 'Major',
+    color: '#EA580C',
     weight: 3,
-    opacity: 0.7,
-    dashArray: '5, 5',
+    icon: '🟠',
+  },
+  [EventSeverity.MODERATE]: {
+    label: 'Moderate',
+    color: '#F59E0B',
+    weight: 2,
+    icon: '🟡',
+  },
+  [EventSeverity.MINOR]: {
+    label: 'Minor',
+    color: '#3B82F6',
+    weight: 1,
+    icon: '🔵',
+  },
+  [EventSeverity.UNKNOWN]: {
+    label: 'Unknown',
+    color: '#6B7280',
+    weight: 0,
+    icon: '⚪',
   },
 } as const;
 
 // Marker Configuration
 export const MARKER_CONFIG = {
-  SIZE: {
-    width: 30,
-    height: 30,
+  DEFAULT_SIZE: 32,
+  SELECTED_SIZE: 40,
+  CLUSTER_SIZE: 40,
+  CLOSURE_ICON_SIZE: 36,
+  Z_INDEX: {
+    DEFAULT: 100,
+    SELECTED: 200,
+    CLOSURE: 150,
   },
-  CLUSTER: {
-    small: {
-      size: 40,
-      className: 'marker-cluster-small',
-    },
-    medium: {
-      size: 50,
-      className: 'marker-cluster-medium',
-    },
-    large: {
-      size: 60,
-      className: 'marker-cluster-large',
-    },
+  ANIMATION: {
+    PULSE_DURATION: 2000,
+    BOUNCE_DURATION: 500,
   },
 } as const;
 
-// Filter Defaults
+// Filter Configuration
 export const DEFAULT_FILTERS = {
-  eventType: '',
-  severity: '',
-  closuresOnly: false,
-  activeOnly: true,
-  includeWzdx: false,
+  eventType: null as EventType | null,
+  severity: null as EventSeverity | null,
+  showClosuresOnly: false,
+  searchTerm: '',
+  areas: [] as string[],
+  roads: [] as string[],
+  dateRange: null as { start: Date; end: Date } | null,
 } as const;
 
 // Storage Keys
 export const STORAGE_KEYS = {
   API_KEY: '511_api_key',
   FILTERS: '511_filters',
-  MAP_VIEW: '511_map_view',
+  MAP_CENTER: '511_map_center',
+  MAP_ZOOM: '511_map_zoom',
   FAVORITES: '511_favorites',
   SETTINGS: '511_settings',
-} as const;
-
-// Time Constants
-export const TIME_CONSTANTS = {
-  RECENT_THRESHOLD_MINUTES: 30,
-  STALE_THRESHOLD_HOURS: 24,
-  DATE_FORMAT: 'MMM d, yyyy h:mm a',
-  TIME_FORMAT: 'h:mm a',
+  RATE_LIMIT: '511_rate_limit',
+  CACHE: '511_cache',
+  NOTIFICATIONS: '511_notifications',
 } as const;
 
 // Error Messages
 export const ERROR_MESSAGES = {
-  INVALID_API_KEY: 'Invalid API key. Please check your 511.org API key.',
-  RATE_LIMIT_EXCEEDED: 'Rate limit exceeded. Please try again later.',
-  NETWORK_ERROR: 'Network error. Please check your connection.',
-  NO_EVENTS: 'No active events in this area.',
-  GEOLOCATION_DENIED: 'Location access denied.',
-  GEOLOCATION_UNAVAILABLE: 'Location information unavailable.',
-  CACHE_ERROR: 'Failed to cache data.',
-  UNKNOWN_ERROR: 'An unexpected error occurred.',
+  NO_API_KEY: 'API key is required. Please obtain one from https://511.org/open-data/token',
+  INVALID_API_KEY: 'Invalid API key. Please check your API key and try again.',
+  RATE_LIMIT_EXCEEDED: 'Rate limit exceeded. Please wait before making more requests.',
+  NETWORK_ERROR: 'Network error. Please check your connection and try again.',
+  UNKNOWN_ERROR: 'An unexpected error occurred. Please try again later.',
+  NO_EVENTS: 'No traffic events found in the selected area.',
+  CACHE_ERROR: 'Failed to access cache storage.',
+  GEOLOCATION_ERROR: 'Failed to get your location.',
+  INVALID_DATA: 'Received invalid data from the API.',
 } as const;
 
 // Success Messages
 export const SUCCESS_MESSAGES = {
-  API_KEY_SAVED: 'API key saved successfully.',
-  FILTERS_APPLIED: 'Filters applied.',
+  API_KEY_VALIDATED: 'API key validated successfully.',
+  EVENTS_LOADED: 'Traffic events loaded successfully.',
   CACHE_CLEARED: 'Cache cleared successfully.',
-  LOCATION_FOUND: 'Location found.',
+  FILTERS_RESET: 'Filters reset successfully.',
+  LOCATION_FOUND: 'Location found successfully.',
 } as const;
+
+// Date/Time Formats
+export const DATE_FORMATS = {
+  DISPLAY: 'MMM d, yyyy h:mm a',
+  SHORT: 'MMM d, h:mm a',
+  TIME_ONLY: 'h:mm a',
+  DATE_ONLY: 'MMM d, yyyy',
+  ISO: "yyyy-MM-dd'T'HH:mm:ss'Z'",
+  RELATIVE: 'relative', // Special format for relative time
+} as const;
+
+// Animation Durations
+export const ANIMATION_DURATIONS = {
+  FAST: 150,
+  NORMAL: 300,
+  SLOW: 500,
+  VERY_SLOW: 1000,
+} as const;
+
+// Breakpoints
+export const BREAKPOINTS = {
+  XS: 475,
+  SM: 640,
+  MD: 768,
+  LG: 1024,
+  XL: 1280,
+  '2XL': 1536,
+} as const;
+
+// Z-Index Layers
+export const Z_INDEX = {
+  MAP: 1,
+  GEOFENCE: 10,
+  MARKERS: 100,
+  SELECTED_MARKER: 200,
+  CONTROLS: 1000,
+  PANEL: 1001,
+  MODAL: 2000,
+  TOOLTIP: 3000,
+  NOTIFICATION: 4000,
+} as const;
+
+// Accessibility
+export const ARIA_LABELS = {
+  MAP: 'Interactive traffic map',
+  FILTER_PANEL: 'Filter traffic events',
+  EVENT_LIST: 'List of traffic events',
+  EVENT_DETAILS: 'Traffic event details',
+  CLOSE_BUTTON: 'Close',
+  REFRESH_BUTTON: 'Refresh events',
+  ZOOM_IN: 'Zoom in',
+  ZOOM_OUT: 'Zoom out',
+  MY_LOCATION: 'Center on my location',
+  CLEAR_FILTERS: 'Clear all filters',
+} as const;
+
+// Keyboard Shortcuts
+export const KEYBOARD_SHORTCUTS = {
+  TOGGLE_SIDEBAR: 's',
+  TOGGLE_EVENT_LIST: 'e',
+  CLEAR_FILTERS: 'c',
+  REFRESH: 'r',
+  ZOOM_IN: '+',
+  ZOOM_OUT: '-',
+  ESCAPE: 'Escape',
+} as const;
+
+// Export all constants as a single object for convenience
+export const CONSTANTS = {
+  API: API_CONFIG,
+  RATE_LIMIT: RATE_LIMIT_CONFIG,
+  CACHE: CACHE_CONFIG,
+  POLLING: POLLING_CONFIG,
+  MAP: MAP_CONFIG,
+  GEOFENCE,
+  EVENT_TYPES: EVENT_TYPE_CONFIG,
+  SEVERITIES: SEVERITY_CONFIG,
+  MARKERS: MARKER_CONFIG,
+  FILTERS: DEFAULT_FILTERS,
+  STORAGE: STORAGE_KEYS,
+  ERRORS: ERROR_MESSAGES,
+  SUCCESS: SUCCESS_MESSAGES,
+  DATES: DATE_FORMATS,
+  ANIMATIONS: ANIMATION_DURATIONS,
+  BREAKPOINTS,
+  Z_INDEX,
+  ARIA: ARIA_LABELS,
+  KEYS: KEYBOARD_SHORTCUTS,
+} as const;
+
+// Type exports for TypeScript
+export type MapConfig = typeof MAP_CONFIG;
+export type EventTypeConfig = typeof EVENT_TYPE_CONFIG;
+export type SeverityConfig = typeof SEVERITY_CONFIG;
+export type StorageKey = typeof STORAGE_KEYS[keyof typeof STORAGE_KEYS];
+export type ErrorMessage = typeof ERROR_MESSAGES[keyof typeof ERROR_MESSAGES];
+export type SuccessMessage = typeof SUCCESS_MESSAGES[keyof typeof SUCCESS_MESSAGES];
