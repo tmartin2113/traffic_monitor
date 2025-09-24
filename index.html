@@ -1,83 +1,156 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="alternate icon" href="/favicon.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#3B82F6" />
+  
+  <!-- SEO Meta Tags -->
+  <title>511 Bay Area Traffic Monitor - Real-Time Traffic & Road Conditions</title>
+  <meta name="description" content="Monitor real-time traffic conditions, road closures, and incidents in the San Francisco Bay Area. Live updates from 511.org API with interactive map visualization." />
+  <meta name="keywords" content="traffic, Bay Area, San Francisco, road conditions, accidents, closures, real-time, 511, commute, navigation" />
+  <meta name="author" content="Your Organization" />
+  
+  <!-- Open Graph / Facebook -->
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://yourdomain.com/" />
+  <meta property="og:title" content="511 Bay Area Traffic Monitor" />
+  <meta property="og:description" content="Real-time traffic monitoring for the San Francisco Bay Area" />
+  <meta property="og:image" content="https://yourdomain.com/og-image.png" />
+  
+  <!-- Twitter -->
+  <meta property="twitter:card" content="summary_large_image" />
+  <meta property="twitter:url" content="https://yourdomain.com/" />
+  <meta property="twitter:title" content="511 Bay Area Traffic Monitor" />
+  <meta property="twitter:description" content="Real-time traffic monitoring for the San Francisco Bay Area" />
+  <meta property="twitter:image" content="https://yourdomain.com/og-image.png" />
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin="" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+  
+  <!-- Preconnect to external domains -->
+  <link rel="preconnect" href="https://api.511.org">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  
+  <!-- Inter Font -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Critical CSS for preventing layout shift -->
+  <style>
+    :root {
+      --primary-color: #3B82F6;
+      --secondary-color: #6366F1;
+      --success-color: #22C55E;
+      --warning-color: #FB923C;
+      --danger-color: #EF4444;
+      --info-color: #0EA5E9;
+    }
     
-    <!-- SEO Meta Tags -->
-    <meta name="description" content="Real-time traffic monitoring for San Francisco Bay Area. Track road closures, accidents, and construction using 511.org data." />
-    <meta name="keywords" content="traffic, bay area, 511, road closures, accidents, real-time, san francisco, oakland, san jose" />
-    <meta name="author" content="511 Traffic Monitor" />
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
     
-    <!-- Open Graph / Facebook -->
-    <meta property="og:type" content="website" />
-    <meta property="og:title" content="511 Bay Area Traffic Monitor" />
-    <meta property="og:description" content="Real-time traffic monitoring for San Francisco Bay Area" />
-    <meta property="og:image" content="/og-image.png" />
+    html, body {
+      height: 100%;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
     
-    <!-- Twitter -->
-    <meta property="twitter:card" content="summary_large_image" />
-    <meta property="twitter:title" content="511 Bay Area Traffic Monitor" />
-    <meta property="twitter:description" content="Real-time traffic monitoring for San Francisco Bay Area" />
-    <meta property="twitter:image" content="/og-image.png" />
+    #root {
+      height: 100%;
+      overflow: hidden;
+      position: relative;
+    }
     
-    <!-- PWA -->
-    <meta name="theme-color" content="#3b82f6" />
-    <link rel="manifest" href="/manifest.json" />
+    /* Loading spinner styles */
+    .loading-container {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
     
-    <!-- Preconnect to external domains -->
-    <link rel="preconnect" href="https://api.511.org" />
-    <link rel="preconnect" href="https://tile.openstreetmap.org" />
+    .loading-spinner {
+      width: 50px;
+      height: 50px;
+      border: 4px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: white;
+      animation: spin 1s linear infinite;
+    }
     
-    <!-- Leaflet CSS -->
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-      crossorigin=""
-    />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
-    />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
-    />
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
     
-    <title>511 Bay Area Traffic Monitor</title>
-  </head>
-  <body>
-    <div id="root"></div>
+    /* Prevent FOUC */
+    .no-js {
+      display: none;
+    }
+  </style>
+  
+  <script>
+    // Remove no-js class if JavaScript is enabled
+    document.documentElement.classList.remove('no-js');
     
-    <!-- No JavaScript Message -->
-    <noscript>
-      <div style="
-        position: fixed;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: white;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: system-ui, -apple-system, sans-serif;
-        padding: 20px;
-        text-align: center;
-      ">
-        <div>
-          <h1 style="color: #1e40af; margin-bottom: 10px;">
-            JavaScript Required
-          </h1>
-          <p style="color: #64748b;">
-            Please enable JavaScript to use the 511 Bay Area Traffic Monitor.
-          </p>
-        </div>
+    // Check for required browser features
+    if (!window.Promise || !window.fetch || !window.Map || !window.Set) {
+      document.addEventListener('DOMContentLoaded', function() {
+        document.body.innerHTML = '<div style="padding: 20px; text-align: center;"><h1>Browser Not Supported</h1><p>Please update your browser to use this application.</p></div>';
+      });
+    }
+  </script>
+</head>
+<body>
+  <div id="root">
+    <!-- Loading state while app initializes -->
+    <div class="loading-container" id="initial-loader">
+      <div class="loading-spinner"></div>
+    </div>
+  </div>
+  
+  <noscript>
+    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: white; display: flex; align-items: center; justify-content: center; padding: 20px; text-align: center;">
+      <div>
+        <h1 style="color: #EF4444; margin-bottom: 16px;">JavaScript Required</h1>
+        <p style="color: #6B7280;">This application requires JavaScript to be enabled in your browser.</p>
+        <p style="color: #6B7280; margin-top: 8px;">Please enable JavaScript and refresh the page.</p>
       </div>
-    </noscript>
-    
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+    </div>
+  </noscript>
+  
+  <script type="module" src="/src/main.tsx"></script>
+  
+  <!-- Remove initial loader when app loads -->
+  <script>
+    window.addEventListener('DOMContentLoaded', function() {
+      setTimeout(function() {
+        const loader = document.getElementById('initial-loader');
+        if (loader) {
+          loader.style.transition = 'opacity 0.3s';
+          loader.style.opacity = '0';
+          setTimeout(function() {
+            loader.remove();
+          }, 300);
+        }
+      }, 100);
+    });
+  </script>
+</body>
 </html>
