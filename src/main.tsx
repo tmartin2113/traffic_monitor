@@ -1,6 +1,13 @@
 /**
  * Application Entry Point
- * Bootstraps the React application with all necessary providers and configurations
+ * 
+ * @module main
+ * @description Bootstraps the React application with all necessary providers and configurations.
+ * Handles initial setup, error boundaries, and performance monitoring.
+ * 
+ * @author Senior Development Team
+ * @since 1.0.0
+ * @license MIT
  */
 
 import React from 'react';
@@ -9,27 +16,29 @@ import App from './App';
 import './styles/globals.css';
 import './styles/map.css';
 
-// Performance monitoring
-if (import.meta.env.PROD) {
-  // Report Web Vitals for production monitoring
-  const reportWebVitals = async (onPerfEntry?: (metric: any) => void) => {
-    if (onPerfEntry && onPerfEntry instanceof Function) {
-      const { getCLS, getFID, getFCP, getLCP, getTTFB } = await import('web-vitals');
-      getCLS(onPerfEntry);
-      getFID(onPerfEntry);
-      getFCP(onPerfEntry);
-      getLCP(onPerfEntry);
-      getTTFB(onPerfEntry);
-    }
-  };
+// Import Leaflet CSS globally (if not loaded via CDN)
+import 'leaflet/dist/leaflet.css';
+import 'leaflet.markercluster/dist/MarkerCluster.css';
+import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
 
-  // Log performance metrics to console in production
-  reportWebVitals((metric) => {
-    console.log(`[Performance] ${metric.name}:`, Math.round(metric.value));
-  });
-}
+// Fix Leaflet default icon issue with Vite
+import L from 'leaflet';
+import markerIcon from 'leaflet/dist/images/marker-icon.png';
+import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png';
+import markerShadow from 'leaflet/dist/images/marker-shadow.png';
 
-// Error boundary for production error handling
+// Configure Leaflet default icon
+delete (L.Icon.Default.prototype as any)._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconUrl: markerIcon,
+  iconRetinaUrl: markerIcon2x,
+  shadowUrl: markerShadow,
+});
+
+/**
+ * Error Boundary Component
+ * Catches and displays errors gracefully
+ */
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
   { hasError: boolean; error: Error | null }
@@ -44,48 +53,44 @@ class ErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    // Log to error reporting service in production
-    if (import.meta.env.PROD) {
-      console.error('Application Error:', error);
-      console.error('Error Info:', errorInfo);
-      
-      // Send to error tracking service (e.g., Sentry)
-      // window.Sentry?.captureException(error, { contexts: { react: errorInfo } });
+    console.error('Application error:', error, errorInfo);
+    
+    // Send error to monitoring service if configured
+    if (import.meta.env.VITE_SENTRY_DSN) {
+      // Sentry.captureException(error, { contexts: { react: errorInfo } });
     }
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen flex items-center justify-center bg-gray-100 px-4">
-          <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-6">
-            <div className="flex items-center mb-4">
-              <svg className="w-8 h-8 text-red-500 mr-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} 
-                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <h1 className="text-xl font-bold text-gray-900">Application Error</h1>
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
+          <div className="max-w-md w-full space-y-8 text-center">
+            <div className="bg-white p-8 rounded-lg shadow-lg">
+              <div className="text-6xl mb-4">⚠️</div>
+              <h1 className="text-2xl font-bold text-gray-900 mb-2">
+                Something went wrong
+              </h1>
+              <p className="text-gray-600 mb-6">
+                We encountered an unexpected error. Please refresh the page to try again.
+              </p>
+              <button
+                onClick={() => window.location.reload()}
+                className="w-full bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 transition-colors"
+              >
+                Refresh Page
+              </button>
+              {import.meta.env.DEV && this.state.error && (
+                <details className="mt-4 text-left">
+                  <summary className="cursor-pointer text-sm text-gray-500">
+                    Error details (Development only)
+                  </summary>
+                  <pre className="mt-2 text-xs bg-gray-100 p-2 rounded overflow-auto">
+                    {this.state.error.stack}
+                  </pre>
+                </details>
+              )}
             </div>
-            <p className="text-gray-600 mb-4">
-              We're sorry, but something went wrong. Please try refreshing the page.
-            </p>
-            {import.meta.env.DEV && this.state.error && (
-              <details className="mt-4 p-4 bg-red-50 rounded text-sm">
-                <summary className="cursor-pointer font-medium text-red-800">
-                  Error Details (Development Only)
-                </summary>
-                <pre className="mt-2 text-xs text-red-600 overflow-auto">
-                  {this.state.error.toString()}
-                  {this.state.error.stack}
-                </pre>
-              </details>
-            )}
-            <button 
-              onClick={() => window.location.reload()}
-              className="mt-4 w-full px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-            >
-              Refresh Page
-            </button>
           </div>
         </div>
       );
@@ -95,46 +100,99 @@ class ErrorBoundary extends React.Component<
   }
 }
 
-// Service Worker Registration for PWA support
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch((error) => {
-      console.log('Service Worker registration failed:', error);
-    });
+/**
+ * Performance monitoring
+ */
+if (import.meta.env.PROD && 'reportWebVitals' in window) {
+  // Report Web Vitals for performance monitoring
+  import('web-vitals').then(({ onCLS, onFID, onFCP, onLCP, onTTFB }) => {
+    onCLS(console.log);
+    onFID(console.log);
+    onFCP(console.log);
+    onLCP(console.log);
+    onTTFB(console.log);
   });
 }
 
-// Check for required environment variables
-const requiredEnvVars = ['VITE_511_API_KEY'];
-const missingEnvVars = requiredEnvVars.filter(
-  (varName) => !import.meta.env[varName]
-);
-
-if (missingEnvVars.length > 0 && import.meta.env.PROD) {
-  console.warn(
-    `Missing required environment variables: ${missingEnvVars.join(', ')}`
+/**
+ * Check for required environment variables
+ */
+const checkEnvironment = (): void => {
+  const requiredEnvVars = ['VITE_511_API_KEY'];
+  const missingVars = requiredEnvVars.filter(
+    (varName) => !import.meta.env[varName]
   );
-}
 
-// Initialize application
-const rootElement = document.getElementById('root');
+  if (missingVars.length > 0 && import.meta.env.PROD) {
+    console.warn(
+      `Missing required environment variables: ${missingVars.join(', ')}`
+    );
+  }
+};
 
-if (!rootElement) {
-  throw new Error('Failed to find root element');
-}
+/**
+ * Initialize application
+ */
+const initializeApp = async (): Promise<void> => {
+  try {
+    // Check environment
+    checkEnvironment();
 
-// Create root and render application
-const root = ReactDOM.createRoot(rootElement);
+    // Get root element
+    const rootElement = document.getElementById('root');
+    if (!rootElement) {
+      throw new Error('Root element not found');
+    }
 
-root.render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+    // Create React root and render
+    const root = ReactDOM.createRoot(rootElement);
+    
+    root.render(
+      <React.StrictMode>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </React.StrictMode>
+    );
 
-// Hot Module Replacement for development
-if (import.meta.hot) {
-  import.meta.hot.accept();
-}
+    // Remove loading state
+    const loadingElement = document.querySelector('.app-loading');
+    if (loadingElement) {
+      loadingElement.remove();
+    }
+
+    // Log successful initialization
+    console.log(
+      '%c🚗 511 Bay Area Traffic Monitor initialized successfully',
+      'color: #3b82f6; font-weight: bold; font-size: 14px;'
+    );
+
+    // Display version info in development
+    if (import.meta.env.DEV) {
+      console.log(
+        `%cVersion: ${import.meta.env.VITE_BUILD_VERSION || '1.0.0-dev'}`,
+        'color: #6b7280; font-size: 12px;'
+      );
+      console.log(
+        `%cEnvironment: ${import.meta.env.MODE}`,
+        'color: #6b7280; font-size: 12px;'
+      );
+    }
+  } catch (error) {
+    console.error('Failed to initialize application:', error);
+    
+    // Display error message
+    document.getElementById('root')!.innerHTML = `
+      <div style="padding: 20px; text-align: center; font-family: system-ui, sans-serif;">
+        <h1>Failed to load application</h1>
+        <p>Please check your internet connection and try refreshing the page.</p>
+        <button onclick="location.reload()" style="padding: 10px 20px; margin-top: 20px; cursor: pointer;">
+          Refresh Page
+        </button>
+      </div>
+    `;
+  }
+};
+
+// Start the application
+initializeApp();
