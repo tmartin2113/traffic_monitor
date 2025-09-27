@@ -1,158 +1,242 @@
 /**
- * Traffic API Service
- * Production-ready service for interacting with 511.org API
+ * Traffic API Service with Differential Updates
+ * Production-ready implementation for 511.org Bay Area Traffic Data
+ * 
+ * @module services/api/trafficApi
+ * @version 2.0.0
  */
 
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
 import { z } from 'zod';
-import {
-  TrafficEvent,
+import { 
+  TrafficEvent, 
   TrafficEventsResponse,
-  TrafficEventParams,
   EventType,
   EventSeverity,
-  EventStatus,
-  APIErrorResponse,
-} from '@/types/api.types';
-import { CacheManager } from '@/services/cache/CacheManager';
-import { RateLimiter } from '@/services/rateLimit/RateLimiter';
-import { GEOFENCE, API_CONFIG, ERROR_MESSAGES } from '@/utils/constants';
+  Geography,
+  Road,
+  Area,
+  SourceType,
+  Pagination,
+  Meta
+} from '@types/api.types';
+import { API_CONFIG, GEOFENCE, CACHE_CONFIG } from '@utils/constants';
+import { rateLimiter } from '@services/rateLimit/RateLimiter';
+import { cacheManager } from '@services/cache/CacheManager';
+import { isPointInBounds, isLineIntersectsBounds } from '@utils/geoUtils';
 
-// Custom error class for API errors
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+export interface TrafficParams {
+  api_key: string;
+  event_type?: EventType;
+  severity?: EventSeverity;
+  status?: 'ACTIVE' | 'ARCHIVED' | 'ALL';
+  jurisdiction?: string;
+  bbox?: string;
+  limit?: number;
+  offset?: number;
+  format?: 'json' | 'xml';
+  include_geometry?: boolean;
+}
+
+export interface DifferentialParams extends TrafficParams {
+  since?: string;
+  include_deleted?: boolean;
+  version_only?: boolean;
+  compression?: 'gzip' | 'none';
+}
+
+export interface DifferentialResponse {
+  hasChanges: boolean;
+  added: TrafficEvent[];
+  updated: TrafficEvent[];
+  deleted: string[];
+  timestamp: string;
+  metadata: {
+    totalChanges: number;
+    syncVersion: string;
+    compressed: boolean;
+    fromTimestamp?: string;
+    toTimestamp: string;
+  };
+}
+
+export interface EventVersion {
+  id: string;
+  version: string;
+  updated: string;
+  hash?: string;
+}
+
+export interface SyncState {
+  lastSyncTimestamp: string | null;
+  eventVersions: Map<string, EventVersion>;
+  syncId: string;
+  totalEvents: number;
+}
+
 export class TrafficAPIError extends Error {
   constructor(
     message: string,
-    public code?: string,
-    public status?: number,
+    public code: string,
+    public statusCode?: number,
     public details?: any
   ) {
     super(message);
     this.name = 'TrafficAPIError';
+    Object.setPrototypeOf(this, TrafficAPIError.prototype);
   }
 }
 
-// Zod schema for runtime validation
+// ============================================================================
+// Schema Validation
+// ============================================================================
+
 const TrafficEventSchema = z.object({
   id: z.string(),
-  status: z.nativeEnum(EventStatus),
-  headline: z.string(),
-  description: z.string().optional(),
+  self: z.string().optional(),
+  jurisdiction: z.string().optional(),
   event_type: z.nativeEnum(EventType),
+  event_subtypes: z.array(z.string()).optional(),
   severity: z.nativeEnum(EventSeverity),
+  status: z.enum(['ACTIVE', 'ARCHIVED']),
+  headline: z.string().optional(),
+  description: z.string().optional(),
   created: z.string(),
   updated: z.string(),
+  schedule: z.any().optional(),
   geography: z.object({
-    type: z.enum(['Point', 'LineString', 'MultiPoint', 'MultiLineString']),
-    coordinates: z.union([
-      z.array(z.number()),
-      z.array(z.array(z.number())),
-    ]),
-  }),
+    type: z.string(),
+    coordinates: z.array(z.any())
+  }).optional(),
   roads: z.array(z.object({
     name: z.string(),
     from: z.string().optional(),
     to: z.string().optional(),
     direction: z.string().optional(),
-    state: z.string().optional(),
+    state: z.nativeEnum(RoadState).optional(),
+    lanes_blocked: z.array(z.string()).optional(),
+    impacted_systems: z.array(z.string()).optional()
   })).optional(),
   areas: z.array(z.object({
+    id: z.string(),
     name: z.string(),
-  })).optional(),
-}).passthrough();
+    url: z.string().optional()
+  })).optional()
+});
 
-// Singleton instances
-const cacheManager = new CacheManager();
-const rateLimiter = new RateLimiter(
-  parseInt(import.meta.env.VITE_RATE_LIMIT_MAX_REQUESTS || '60'),
-  parseInt(import.meta.env.VITE_RATE_LIMIT_WINDOW_MS || '3600000')
-);
+const TrafficEventsResponseSchema = z.object({
+  events: z.array(TrafficEventSchema),
+  pagination: z.object({
+    offset: z.number(),
+    limit: z.number().optional(),
+    next_url: z.string().optional(),
+    previous_url: z.string().optional()
+  }).optional(),
+  meta: z.object({
+    url: z.string(),
+    up_url: z.string().optional(),
+    version: z.string()
+  }).optional()
+});
 
-/**
- * Traffic API Service Class
- */
+// ============================================================================
+// Main API Class
+// ============================================================================
+
 export class TrafficAPI {
-  private client: AxiosInstance;
+  private axiosInstance: AxiosInstance;
   private apiKey: string | null = null;
-  private baseURL: string;
-  private retryCount = 3;
-  private retryDelay = 1000;
+  private syncState: SyncState;
+  private lastETag: string | null = null;
+  private compressionSupported: boolean = true;
+  private retryQueue: Map<string, number> = new Map();
+  private activeRequests: Map<string, Promise<any>> = new Map();
 
-  constructor() {
-    this.baseURL = import.meta.env.VITE_API_BASE_URL || API_CONFIG.BASE_URL;
-    
-    this.client = axios.create({
-      baseURL: this.baseURL,
-      timeout: 30000,
+  constructor(apiKey?: string) {
+    this.apiKey = apiKey || null;
+    this.syncState = {
+      lastSyncTimestamp: null,
+      eventVersions: new Map(),
+      syncId: this.generateSyncId(),
+      totalEvents: 0
+    };
+
+    this.axiosInstance = axios.create({
+      baseURL: API_CONFIG.BASE_URL,
+      timeout: API_CONFIG.REQUEST_TIMEOUT_MS,
       headers: {
         'Accept': 'application/json',
-        'Content-Type': 'application/json',
+        'Accept-Encoding': 'gzip, deflate',
+        'User-Agent': `511-Traffic-Monitor/2.0.0`,
+        'X-Client-Id': this.syncState.syncId
       },
+      validateStatus: (status) => status < 500
     });
 
-    // Request interceptor for logging and rate limiting
-    this.client.interceptors.request.use(
+    this.setupInterceptors();
+    this.loadSyncState();
+  }
+
+  /**
+   * Setup axios interceptors for request/response handling
+   */
+  private setupInterceptors(): void {
+    // Request interceptor
+    this.axiosInstance.interceptors.request.use(
       async (config) => {
-        // Check rate limit
-        if (!rateLimiter.canMakeRequest()) {
-          throw new TrafficAPIError(
-            ERROR_MESSAGES.RATE_LIMIT_EXCEEDED,
-            'RATE_LIMITED',
-            429
-          );
-        }
-
         // Add API key
-        if (this.apiKey && config.params) {
-          config.params.api_key = this.apiKey;
+        if (this.apiKey) {
+          config.params = {
+            ...config.params,
+            api_key: this.apiKey
+          };
         }
 
-        // Log request in development
-        if (import.meta.env.DEV) {
-          console.log(`[API Request] ${config.method?.toUpperCase()} ${config.url}`, config.params);
+        // Add conditional headers for differential updates
+        if (this.syncState.lastSyncTimestamp && config.headers) {
+          config.headers['If-Modified-Since'] = this.syncState.lastSyncTimestamp;
         }
+
+        if (this.lastETag && config.headers) {
+          config.headers['If-None-Match'] = this.lastETag;
+        }
+
+        // Add request tracking
+        config.headers['X-Request-Id'] = this.generateRequestId();
 
         return config;
       },
       (error) => Promise.reject(error)
     );
 
-    // Response interceptor for error handling and logging
-    this.client.interceptors.response.use(
+    // Response interceptor
+    this.axiosInstance.interceptors.response.use(
       (response) => {
-        // Track successful request
-        rateLimiter.trackRequest();
+        // Store ETag for future requests
+        if (response.headers['etag']) {
+          this.lastETag = response.headers['etag'];
+        }
 
-        // Log response in development
-        if (import.meta.env.DEV) {
-          console.log(`[API Response] ${response.status}`, response.data);
+        // Update last modified timestamp
+        if (response.headers['last-modified']) {
+          this.syncState.lastSyncTimestamp = response.headers['last-modified'];
         }
 
         return response;
       },
       async (error: AxiosError) => {
-        // Handle rate limiting from server
         if (error.response?.status === 429) {
-          const retryAfter = error.response.headers['retry-after'];
-          if (retryAfter) {
-            rateLimiter.setResetTime(Date.now() + parseInt(retryAfter) * 1000);
-          }
+          // Handle rate limiting with exponential backoff
+          return this.handleRateLimit(error);
         }
 
-        // Retry logic for transient errors
-        const config = error.config as AxiosRequestConfig & { __retryCount?: number };
-        const shouldRetry = 
-          error.response?.status === 503 || 
-          error.response?.status === 502 ||
-          error.code === 'ECONNABORTED';
-
-        if (shouldRetry && config && (!config.__retryCount || config.__retryCount < this.retryCount)) {
-          config.__retryCount = (config.__retryCount || 0) + 1;
-          
-          await new Promise(resolve => 
-            setTimeout(resolve, this.retryDelay * Math.pow(2, config.__retryCount - 1))
-          );
-          
-          return this.client(config);
+        if (error.response?.status === 503 || error.code === 'ECONNABORTED') {
+          // Handle service unavailable with retry
+          return this.handleServiceUnavailable(error);
         }
 
         return Promise.reject(error);
@@ -161,191 +245,399 @@ export class TrafficAPI {
   }
 
   /**
-   * Set API key
+   * Set or update API key
    */
   setApiKey(apiKey: string): void {
     this.apiKey = apiKey;
   }
 
   /**
-   * Validate API key
+   * Fetch all events within the geofenced area
    */
-  async validateApiKey(apiKey?: string): Promise<boolean> {
-    const keyToValidate = apiKey || this.apiKey;
+  async fetchGeofencedEvents(
+    params: Partial<TrafficParams> = {}
+  ): Promise<TrafficEvent[]> {
+    const cacheKey = this.buildCacheKey('events-geofenced', params);
     
-    if (!keyToValidate) {
-      return false;
+    // Check for pending request deduplication
+    if (this.activeRequests.has(cacheKey)) {
+      return this.activeRequests.get(cacheKey);
     }
 
+    // Check cache
+    const cached = await cacheManager.get<TrafficEvent[]>(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+
+    const request = this.performGeofencedFetch(params, cacheKey);
+    this.activeRequests.set(cacheKey, request);
+
     try {
-      const response = await this.client.get('/traffic/events', {
-        params: {
-          api_key: keyToValidate,
-          limit: 1,
-        },
-      });
-      
-      return response.status === 200;
-    } catch (error) {
-      return false;
+      const result = await request;
+      return result;
+    } finally {
+      this.activeRequests.delete(cacheKey);
     }
   }
 
   /**
-   * Fetch traffic events with caching and validation
+   * Perform the actual geofenced fetch
    */
-  async fetchEvents(
-    params: Partial<TrafficEventParams> = {}
+  private async performGeofencedFetch(
+    params: Partial<TrafficParams>,
+    cacheKey: string
   ): Promise<TrafficEvent[]> {
-    if (!this.apiKey) {
-      throw new TrafficAPIError(
-        ERROR_MESSAGES.NO_API_KEY,
-        'NO_API_KEY'
-      );
-    }
-
-    // Build cache key
-    const cacheKey = this.buildCacheKey('/traffic/events', params);
-    
-    // Check cache
-    const cachedData = await cacheManager.get<TrafficEvent[]>(cacheKey);
-    if (cachedData) {
-      if (import.meta.env.DEV) {
-        console.log('[API Cache Hit]', cacheKey);
-      }
-      return cachedData;
-    }
+    // Check rate limit
+    await rateLimiter.checkLimit();
 
     try {
-      const response = await this.client.get<{ events: any[] }>('/traffic/events', {
+      const response = await this.axiosInstance.get<TrafficEventsResponse>('/traffic/events', {
         params: {
           ...params,
-          api_key: this.apiKey,
+          bbox: this.getGeofenceBBox(),
+          limit: params.limit || API_CONFIG.DEFAULT_PAGE_SIZE,
+          offset: params.offset || 0,
           format: 'json',
-          limit: params.limit || 500,
-        },
+          include_geometry: true
+        }
       });
 
-      // Validate response structure
-      if (!response.data || !Array.isArray(response.data.events)) {
-        throw new TrafficAPIError(
-          'Invalid API response structure',
-          'INVALID_RESPONSE'
-        );
+      // Handle 304 Not Modified
+      if (response.status === 304) {
+        const cached = await cacheManager.get<TrafficEvent[]>(cacheKey);
+        if (cached) return cached;
       }
 
-      // Validate and transform events
-      const validatedEvents: TrafficEvent[] = [];
-      for (const event of response.data.events) {
-        try {
-          const validated = TrafficEventSchema.parse(event);
-          validatedEvents.push(validated as TrafficEvent);
-        } catch (validationError) {
-          console.warn('Invalid event data:', event, validationError);
-          // Continue processing other events
-        }
-      }
-
+      // Validate response
+      const validated = TrafficEventsResponseSchema.parse(response.data);
+      
+      // Filter events within geofence
+      const filteredEvents = this.filterEventsInGeofence(validated.events);
+      
+      // Update sync state
+      this.updateEventVersions(filteredEvents);
+      
       // Cache the results
       await cacheManager.set(
-        cacheKey,
-        validatedEvents,
-        parseInt(import.meta.env.VITE_CACHE_TTL || '30000')
+        cacheKey, 
+        filteredEvents, 
+        CACHE_CONFIG.DEFAULT_TTL_MS
       );
 
-      return validatedEvents;
+      return filteredEvents;
     } catch (error) {
       this.handleError(error);
     }
   }
 
   /**
-   * Fetch events within geofence boundaries
+   * Fetch differential updates since last sync
    */
-  async fetchGeofencedEvents(
-    params: Partial<TrafficEventParams> = {}
-  ): Promise<TrafficEvent[]> {
-    const bbox = `${GEOFENCE.BBOX.xmin},${GEOFENCE.BBOX.ymin},${GEOFENCE.BBOX.xmax},${GEOFENCE.BBOX.ymax}`;
+  async fetchDifferentialUpdates(
+    params: Partial<DifferentialParams> = {}
+  ): Promise<DifferentialResponse> {
+    const cacheKey = this.buildCacheKey('differential', params);
     
-    return this.fetchEvents({
-      ...params,
-      bbox,
-    });
+    // Check cache for recent differential
+    const cached = await cacheManager.get<DifferentialResponse>(cacheKey);
+    if (cached && this.isDifferentialValid(cached)) {
+      return cached;
+    }
+
+    // Check rate limit
+    await rateLimiter.checkLimit();
+
+    try {
+      const response = await this.axiosInstance.get('/traffic/events', {
+        params: {
+          ...params,
+          bbox: this.getGeofenceBBox(),
+          since: params.since || this.syncState.lastSyncTimestamp,
+          format: 'json',
+          include_geometry: true
+        },
+        headers: {
+          'X-Differential-Mode': 'true',
+          'X-Include-Deleted': params.include_deleted ? 'true' : 'false',
+          'X-Compression': params.compression || 'gzip'
+        }
+      });
+
+      // Handle 304 Not Modified - no changes
+      if (response.status === 304) {
+        return this.createEmptyDifferential();
+      }
+
+      // Process differential response
+      const differential = await this.processDifferentialResponse(
+        response.data,
+        params.since || this.syncState.lastSyncTimestamp
+      );
+
+      // Update sync state
+      if (differential.hasChanges) {
+        this.syncState.lastSyncTimestamp = differential.timestamp;
+        this.updateDifferentialVersions(differential);
+        this.saveSyncState();
+      }
+
+      // Cache the differential
+      await cacheManager.set(
+        cacheKey,
+        differential,
+        15000 // 15 second cache for differentials
+      );
+
+      return differential;
+    } catch (error) {
+      this.handleError(error);
+    }
   }
 
   /**
-   * Fetch events for specific roads
+   * Process raw API response into differential format
    */
-  async fetchEventsByRoad(
-    roadName: string,
-    params: Partial<TrafficEventParams> = {}
-  ): Promise<TrafficEvent[]> {
-    return this.fetchEvents({
-      ...params,
-      road_name: roadName,
-    });
+  private async processDifferentialResponse(
+    data: TrafficEventsResponse,
+    sinceTimestamp: string | null
+  ): Promise<DifferentialResponse> {
+    const events = data.events || [];
+    const added: TrafficEvent[] = [];
+    const updated: TrafficEvent[] = [];
+    const deleted: string[] = [];
+
+    // Get current version map
+    const currentVersions = new Map(this.syncState.eventVersions);
+
+    // Process each event
+    for (const event of events) {
+      const filteredEvent = this.filterEventInGeofence(event);
+      if (!filteredEvent) continue;
+
+      const existingVersion = currentVersions.get(event.id);
+
+      if (!existingVersion) {
+        // New event
+        added.push(event);
+      } else if (this.hasEventChanged(existingVersion, event)) {
+        // Updated event
+        updated.push(event);
+      }
+    }
+
+    // Detect deletions (events that existed before but aren't in response)
+    if (sinceTimestamp && data.meta?.version) {
+      const currentEventIds = new Set(events.map(e => e.id));
+      for (const [id, version] of currentVersions) {
+        if (!currentEventIds.has(id)) {
+          deleted.push(id);
+        }
+      }
+    }
+
+    const totalChanges = added.length + updated.length + deleted.length;
+
+    return {
+      hasChanges: totalChanges > 0,
+      added,
+      updated,
+      deleted,
+      timestamp: new Date().toISOString(),
+      metadata: {
+        totalChanges,
+        syncVersion: data.meta?.version || '1.0',
+        compressed: false,
+        fromTimestamp: sinceTimestamp || undefined,
+        toTimestamp: new Date().toISOString()
+      }
+    };
   }
 
   /**
-   * Fetch active closures
-   */
-  async fetchClosures(
-    params: Partial<TrafficEventParams> = {}
-  ): Promise<TrafficEvent[]> {
-    const events = await this.fetchGeofencedEvents(params);
-    
-    return events.filter(event => 
-      event.roads?.some(road => 
-        road.state === 'CLOSED' || 
-        road.state === 'Closed'
-      ) ||
-      event['+lane_status']?.toLowerCase().includes('closed')
-    );
-  }
-
-  /**
-   * Fetch high-severity events
-   */
-  async fetchHighSeverityEvents(
-    params: Partial<TrafficEventParams> = {}
-  ): Promise<TrafficEvent[]> {
-    return this.fetchGeofencedEvents({
-      ...params,
-      severity: [EventSeverity.SEVERE, EventSeverity.MAJOR],
-    });
-  }
-
-  /**
-   * Search events by keyword
-   */
-  async searchEvents(
-    keyword: string,
-    params: Partial<TrafficEventParams> = {}
-  ): Promise<TrafficEvent[]> {
-    const events = await this.fetchGeofencedEvents(params);
-    const searchTerm = keyword.toLowerCase();
-    
-    return events.filter(event => 
-      event.headline?.toLowerCase().includes(searchTerm) ||
-      event.description?.toLowerCase().includes(searchTerm) ||
-      event.roads?.some(road => 
-        road.name?.toLowerCase().includes(searchTerm)
-      )
-    );
-  }
-
-  /**
-   * Get event by ID
+   * Get a single event by ID
    */
   async getEventById(eventId: string): Promise<TrafficEvent | null> {
-    const events = await this.fetchGeofencedEvents();
-    return events.find(event => event.id === eventId) || null;
+    const cacheKey = `event:${eventId}`;
+    
+    // Check cache
+    const cached = await cacheManager.get<TrafficEvent>(cacheKey);
+    if (cached) return cached;
+
+    // Check rate limit
+    await rateLimiter.checkLimit();
+
+    try {
+      const response = await this.axiosInstance.get<TrafficEvent>(
+        `/traffic/events/${eventId}`
+      );
+
+      if (response.status === 404) {
+        return null;
+      }
+
+      const validated = TrafficEventSchema.parse(response.data);
+      
+      // Cache the result
+      await cacheManager.set(cacheKey, validated, 60000); // 1 minute cache
+
+      return validated;
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 404) {
+        return null;
+      }
+      this.handleError(error);
+    }
+  }
+
+  /**
+   * Check if differential is still valid
+   */
+  private isDifferentialValid(diff: DifferentialResponse): boolean {
+    const age = Date.now() - new Date(diff.timestamp).getTime();
+    return age < 15000; // Valid for 15 seconds
+  }
+
+  /**
+   * Create empty differential response
+   */
+  private createEmptyDifferential(): DifferentialResponse {
+    return {
+      hasChanges: false,
+      added: [],
+      updated: [],
+      deleted: [],
+      timestamp: new Date().toISOString(),
+      metadata: {
+        totalChanges: 0,
+        syncVersion: '1.0',
+        compressed: false,
+        toTimestamp: new Date().toISOString()
+      }
+    };
+  }
+
+  /**
+   * Filter events within geofence boundaries
+   */
+  private filterEventsInGeofence(events: TrafficEvent[]): TrafficEvent[] {
+    return events.filter(event => this.filterEventInGeofence(event));
+  }
+
+  /**
+   * Check if single event is within geofence
+   */
+  private filterEventInGeofence(event: TrafficEvent): TrafficEvent | null {
+    if (!event.geography?.coordinates) return event; // No geography, include it
+
+    const { type, coordinates } = event.geography;
+
+    if (type === 'Point') {
+      const [lng, lat] = coordinates as [number, number];
+      if (!isPointInBounds({ lat, lng }, GEOFENCE.BBOX)) {
+        return null;
+      }
+    } else if (type === 'LineString') {
+      if (!isLineIntersectsBounds(coordinates as number[][], GEOFENCE.BBOX)) {
+        return null;
+      }
+    }
+
+    return event;
+  }
+
+  /**
+   * Check if event has changed
+   */
+  private hasEventChanged(
+    oldVersion: EventVersion,
+    newEvent: TrafficEvent
+  ): boolean {
+    return oldVersion.updated !== newEvent.updated ||
+           oldVersion.version !== this.generateEventVersion(newEvent);
+  }
+
+  /**
+   * Generate version hash for an event
+   */
+  private generateEventVersion(event: TrafficEvent): string {
+    // Create a simple hash based on key fields
+    const versionString = `${event.updated}-${event.status}-${event.severity}`;
+    return Buffer.from(versionString).toString('base64').substring(0, 8);
+  }
+
+  /**
+   * Update event versions in sync state
+   */
+  private updateEventVersions(events: TrafficEvent[]): void {
+    for (const event of events) {
+      this.syncState.eventVersions.set(event.id, {
+        id: event.id,
+        version: this.generateEventVersion(event),
+        updated: event.updated,
+        hash: this.generateEventHash(event)
+      });
+    }
+    this.syncState.totalEvents = this.syncState.eventVersions.size;
+  }
+
+  /**
+   * Update versions from differential
+   */
+  private updateDifferentialVersions(diff: DifferentialResponse): void {
+    // Remove deleted events
+    for (const id of diff.deleted) {
+      this.syncState.eventVersions.delete(id);
+    }
+
+    // Add/update events
+    for (const event of [...diff.added, ...diff.updated]) {
+      this.syncState.eventVersions.set(event.id, {
+        id: event.id,
+        version: this.generateEventVersion(event),
+        updated: event.updated,
+        hash: this.generateEventHash(event)
+      });
+    }
+
+    this.syncState.totalEvents = this.syncState.eventVersions.size;
+  }
+
+  /**
+   * Generate hash for event content
+   */
+  private generateEventHash(event: TrafficEvent): string {
+    const content = JSON.stringify({
+      id: event.id,
+      status: event.status,
+      severity: event.severity,
+      headline: event.headline,
+      updated: event.updated
+    });
+    
+    // Simple hash function
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash;
+    }
+    
+    return Math.abs(hash).toString(36);
+  }
+
+  /**
+   * Get geofence bounding box string
+   */
+  private getGeofenceBBox(): string {
+    const { xmin, ymin, xmax, ymax } = GEOFENCE.BBOX;
+    return `${xmin},${ymin},${xmax},${ymax}`;
   }
 
   /**
    * Build cache key from parameters
    */
-  private buildCacheKey(endpoint: string, params: any): string {
+  private buildCacheKey(prefix: string, params: any): string {
     const sortedParams = Object.keys(params)
       .sort()
       .reduce((acc, key) => {
@@ -355,7 +647,89 @@ export class TrafficAPI {
         return acc;
       }, {} as any);
     
-    return `${endpoint}:${JSON.stringify(sortedParams)}`;
+    return `${prefix}:${JSON.stringify(sortedParams)}`;
+  }
+
+  /**
+   * Generate unique sync ID
+   */
+  private generateSyncId(): string {
+    return `sync-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  /**
+   * Generate unique request ID
+   */
+  private generateRequestId(): string {
+    return `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+  }
+
+  /**
+   * Handle rate limit errors with exponential backoff
+   */
+  private async handleRateLimit(error: AxiosError): Promise<any> {
+    const config = error.config!;
+    const retryAfter = parseInt(
+      error.response?.headers['retry-after'] || '60'
+    );
+    
+    const retryCount = this.retryQueue.get(config.url!) || 0;
+    
+    if (retryCount >= 3) {
+      this.retryQueue.delete(config.url!);
+      throw new TrafficAPIError(
+        'Rate limit exceeded after multiple retries',
+        'RATE_LIMIT_EXCEEDED',
+        429
+      );
+    }
+
+    this.retryQueue.set(config.url!, retryCount + 1);
+    
+    // Wait with exponential backoff
+    const delay = Math.min(retryAfter * 1000, 60000) * Math.pow(2, retryCount);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    try {
+      const response = await this.axiosInstance.request(config);
+      this.retryQueue.delete(config.url!);
+      return response;
+    } catch (retryError) {
+      this.retryQueue.delete(config.url!);
+      throw retryError;
+    }
+  }
+
+  /**
+   * Handle service unavailable errors
+   */
+  private async handleServiceUnavailable(error: AxiosError): Promise<any> {
+    const config = error.config!;
+    const retryCount = this.retryQueue.get(config.url!) || 0;
+    
+    if (retryCount >= 3) {
+      this.retryQueue.delete(config.url!);
+      throw new TrafficAPIError(
+        'Service unavailable after multiple retries',
+        'SERVICE_UNAVAILABLE',
+        503
+      );
+    }
+
+    this.retryQueue.set(config.url!, retryCount + 1);
+    
+    // Wait with exponential backoff
+    const delay = 1000 * Math.pow(2, retryCount);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    try {
+      const response = await this.axiosInstance.request(config);
+      this.retryQueue.delete(config.url!);
+      return response;
+    } catch (retryError) {
+      this.retryQueue.delete(config.url!);
+      throw retryError;
+    }
   }
 
   /**
@@ -363,36 +737,62 @@ export class TrafficAPI {
    */
   private handleError(error: any): never {
     if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError<APIErrorResponse>;
+      const axiosError = error as AxiosError;
       
       if (axiosError.response) {
         const status = axiosError.response.status;
-        const data = axiosError.response.data;
+        const data = axiosError.response.data as any;
         
         switch (status) {
+          case 400:
+            throw new TrafficAPIError(
+              data?.message || 'Bad request parameters',
+              'BAD_REQUEST',
+              400,
+              data
+            );
           case 401:
             throw new TrafficAPIError(
-              ERROR_MESSAGES.INVALID_API_KEY,
+              'Invalid or missing API key',
               'UNAUTHORIZED',
               401
             );
+          case 403:
+            throw new TrafficAPIError(
+              'Access forbidden',
+              'FORBIDDEN',
+              403
+            );
+          case 404:
+            throw new TrafficAPIError(
+              'Resource not found',
+              'NOT_FOUND',
+              404
+            );
           case 429:
             throw new TrafficAPIError(
-              ERROR_MESSAGES.RATE_LIMIT_EXCEEDED,
+              'Rate limit exceeded',
               'RATE_LIMITED',
-              429
+              429,
+              {
+                retryAfter: axiosError.response.headers['retry-after']
+              }
             );
           case 500:
-          case 502:
+            throw new TrafficAPIError(
+              '511.org server error',
+              'SERVER_ERROR',
+              500
+            );
           case 503:
             throw new TrafficAPIError(
               'Service temporarily unavailable',
-              'SERVICE_ERROR',
-              status
+              'SERVICE_UNAVAILABLE',
+              503
             );
           default:
             throw new TrafficAPIError(
-              data?.error?.message || 'API request failed',
+              `API request failed with status ${status}`,
               'API_ERROR',
               status,
               data
@@ -400,14 +800,30 @@ export class TrafficAPI {
         }
       } else if (axiosError.request) {
         throw new TrafficAPIError(
-          ERROR_MESSAGES.NETWORK_ERROR,
-          'NETWORK_ERROR'
+          'Network error - unable to reach 511.org API',
+          'NETWORK_ERROR',
+          undefined,
+          {
+            code: axiosError.code,
+            message: axiosError.message
+          }
         );
       }
     }
-    
+
+    // Handle validation errors
+    if (error instanceof z.ZodError) {
+      throw new TrafficAPIError(
+        'Invalid API response format',
+        'VALIDATION_ERROR',
+        undefined,
+        error.errors
+      );
+    }
+
+    // Unknown error
     throw new TrafficAPIError(
-      ERROR_MESSAGES.UNKNOWN_ERROR,
+      'An unexpected error occurred',
       'UNKNOWN_ERROR',
       undefined,
       error
@@ -415,21 +831,87 @@ export class TrafficAPI {
   }
 
   /**
-   * Clear all caches
+   * Save sync state to localStorage
+   */
+  private saveSyncState(): void {
+    try {
+      const stateToSave = {
+        lastSyncTimestamp: this.syncState.lastSyncTimestamp,
+        syncId: this.syncState.syncId,
+        totalEvents: this.syncState.totalEvents,
+        eventVersions: Array.from(this.syncState.eventVersions.entries())
+      };
+      
+      localStorage.setItem(
+        'traffic-api-sync-state',
+        JSON.stringify(stateToSave)
+      );
+    } catch (error) {
+      console.warn('Failed to save sync state:', error);
+    }
+  }
+
+  /**
+   * Load sync state from localStorage
+   */
+  private loadSyncState(): void {
+    try {
+      const saved = localStorage.getItem('traffic-api-sync-state');
+      if (saved) {
+        const state = JSON.parse(saved);
+        this.syncState = {
+          lastSyncTimestamp: state.lastSyncTimestamp,
+          syncId: state.syncId || this.generateSyncId(),
+          totalEvents: state.totalEvents || 0,
+          eventVersions: new Map(state.eventVersions || [])
+        };
+      }
+    } catch (error) {
+      console.warn('Failed to load sync state:', error);
+    }
+  }
+
+  /**
+   * Clear all cached data and sync state
    */
   async clearCache(): Promise<void> {
     await cacheManager.clear();
+    this.syncState = {
+      lastSyncTimestamp: null,
+      eventVersions: new Map(),
+      syncId: this.generateSyncId(),
+      totalEvents: 0
+    };
+    this.lastETag = null;
+    localStorage.removeItem('traffic-api-sync-state');
+  }
+
+  /**
+   * Get current sync state
+   */
+  getSyncState(): SyncState {
+    return { ...this.syncState };
   }
 
   /**
    * Get API statistics
    */
-  getStats() {
+  getStatistics(): {
+    totalEvents: number;
+    cacheHitRate: number;
+    rateLimitRemaining: number;
+    syncId: string;
+    lastSync: string | null;
+  } {
+    const cacheStats = cacheManager.getStats();
+    const rateLimitInfo = rateLimiter.getInfo();
+    
     return {
-      rateLimit: rateLimiter.getInfo(),
-      cacheStats: cacheManager.getStats(),
-      apiKey: this.apiKey ? 'Set' : 'Not set',
-      baseURL: this.baseURL,
+      totalEvents: this.syncState.totalEvents,
+      cacheHitRate: cacheStats.hitRate,
+      rateLimitRemaining: rateLimitInfo.remaining,
+      syncId: this.syncState.syncId,
+      lastSync: this.syncState.lastSyncTimestamp
     };
   }
 }
