@@ -1,9 +1,9 @@
 /**
- * Event Store - Zustand State Management
- * Manages traffic event data and related state
+ * Event Store with Differential Sync Support
+ * Production-ready Zustand store for traffic event state management
  * 
- * @module src/stores/eventStore
- * @version 1.0.0
+ * @module stores/eventStore
+ * @version 2.0.0
  */
 
 import { create } from 'zustand';
@@ -14,437 +14,695 @@ import {
   TrafficEvent,
   EventType,
   EventSeverity,
-  EventStatus,
   RoadState
-} from '@/types/api.types';
-import { EnhancedTrafficEvent, EventGroup, EventCluster, ImpactLevel } from '@/types/event.types';
-import { MapCenter } from '@/types/map.types';
-import { calculateDistance, isWithinBounds } from '@/utils/geoUtils';
-import { isRoadClosure, getEventImpactLevel, sortEventsByPriority } from '@/utils/eventUtils';
+} from '@types/api.types';
+import { DifferentialResponse } from '@services/api/trafficApi';
+import { EventDiff, ConflictInfo, SyncResult } from '@services/sync/DifferentialSync';
 
-/**
- * Event statistics interface
- */
-interface EventStatistics {
+// ============================================================================
+// Type Definitions
+// ============================================================================
+
+export interface EventStoreState {
+  // ===== Core Event Data =====
+  events: Map<string, TrafficEvent>;
+  eventOrder: string[]; // Maintain insertion order
+  
+  // ===== Version & Sync State =====
+  eventVersions: Map<string, EventVersion>;
+  lastSyncTimestamp: string | null;
+  syncId: string;
+  syncStatus: SyncStatus;
+  syncProgress: number;
+  
+  // ===== Pending Changes & Conflicts =====
+  pendingChanges: Map<string, EventDiff>;
+  conflicts: Map<string, ConflictInfo>;
+  optimisticUpdates: Map<string, OptimisticUpdate>;
+  
+  // ===== Selection & UI State =====
+  selectedEventId: string | null;
+  highlightedEventIds: Set<string>;
+  favoriteEventIds: Set<string>;
+  hiddenEventIds: Set<string>;
+  expandedEventIds: Set<string>;
+  
+  // ===== Filtering & View State =====
+  viewMode: 'list' | 'map' | 'timeline' | 'grid';
+  groupBy: 'none' | 'type' | 'severity' | 'road' | 'time';
+  sortBy: 'severity' | 'updated' | 'created' | 'distance' | 'relevance';
+  sortDirection: 'asc' | 'desc';
+  
+  // ===== Statistics & Metadata =====
+  statistics: EventStatistics;
+  lastUpdated: Date | null;
+  isLoading: boolean;
+  error: string | null;
+  dataQuality: DataQuality;
+  
+  // ===== Actions - Event Management =====
+  setEvents: (events: TrafficEvent[]) => void;
+  addEvent: (event: TrafficEvent) => void;
+  updateEvent: (event: TrafficEvent) => void;
+  removeEvent: (eventId: string) => boolean;
+  clearEvents: () => void;
+  replaceAllEvents: (events: TrafficEvent[]) => void;
+  
+  // ===== Actions - Differential Sync =====
+  applyDifferential: (diff: DifferentialResponse) => SyncResult;
+  mergeDifferential: (diff: DifferentialResponse, strategy: MergeStrategy) => void;
+  trackLocalChange: (eventId: string, changes: Partial<TrafficEvent>) => void;
+  resolveConflict: (eventId: string, resolution: ConflictResolution) => void;
+  clearPendingChanges: () => void;
+  rollbackOptimisticUpdate: (updateId: string) => void;
+  
+  // ===== Actions - Selection & UI =====
+  selectEvent: (eventId: string | null) => void;
+  toggleHighlight: (eventId: string) => void;
+  toggleFavorite: (eventId: string) => void;
+  hideEvent: (eventId: string) => void;
+  unhideEvent: (eventId: string) => void;
+  toggleExpanded: (eventId: string) => void;
+  clearSelection: () => void;
+  
+  // ===== Actions - Batch Operations =====
+  batchUpdate: (updates: BatchUpdate[]) => void;
+  batchDelete: (eventIds: string[]) => void;
+  applyFilter: (predicate: (event: TrafficEvent) => boolean) => void;
+  
+  // ===== Actions - View Management =====
+  setViewMode: (mode: EventStoreState['viewMode']) => void;
+  setGroupBy: (groupBy: EventStoreState['groupBy']) => void;
+  setSorting: (sortBy: EventStoreState['sortBy'], direction?: EventStoreState['sortDirection']) => void;
+  
+  // ===== Actions - Sync Management =====
+  updateSyncTimestamp: (timestamp: string) => void;
+  setSyncStatus: (status: SyncStatus) => void;
+  setSyncProgress: (progress: number) => void;
+  resetSyncState: () => void;
+  
+  // ===== Actions - Statistics =====
+  updateStatistics: () => void;
+  calculateDataQuality: () => void;
+  
+  // ===== Getters =====
+  getEvent: (eventId: string) => TrafficEvent | undefined;
+  getAllEvents: () => TrafficEvent[];
+  getVisibleEvents: () => TrafficEvent[];
+  getEventsByType: (type: EventType) => TrafficEvent[];
+  getEventsBySeverity: (severity: EventSeverity) => TrafficEvent[];
+  getClosureEvents: () => TrafficEvent[];
+  getRecentEvents: (hoursAgo: number) => TrafficEvent[];
+  getNearbyEvents: (lat: number, lng: number, radiusKm: number) => TrafficEvent[];
+  
+  // ===== Utilities =====
+  exportState: () => ExportedState;
+  importState: (state: ExportedState) => void;
+  validateIntegrity: () => IntegrityReport;
+  optimizeStorage: () => void;
+}
+
+export type SyncStatus = 
+  | 'idle' 
+  | 'syncing' 
+  | 'success' 
+  | 'error' 
+  | 'conflict' 
+  | 'offline';
+
+export interface EventVersion {
+  id: string;
+  version: string;
+  updated: string;
+  hash: string;
+  source: 'remote' | 'local';
+}
+
+export interface OptimisticUpdate {
+  id: string;
+  originalEvent: TrafficEvent;
+  optimisticEvent: TrafficEvent;
+  timestamp: number;
+  confirmed: boolean;
+}
+
+export interface EventStatistics {
   total: number;
   active: number;
   closures: number;
   incidents: number;
   construction: number;
-  specialEvents: number;
   bySeverity: Record<EventSeverity, number>;
   byType: Record<EventType, number>;
-  byStatus: Record<EventStatus, number>;
-  recentEvents: number;
-  criticalEvents: number;
-  affectedAreas: string[];
-  affectedRoads: string[];
-  averageAge: number; // in minutes
-  lastUpdateTime: Date | null;
+  recentlyUpdated: number;
+  averageAge: number;
+  updateFrequency: number;
 }
 
-/**
- * Event notification configuration
- */
-interface NotificationConfig {
-  enabled: boolean;
-  closuresOnly: boolean;
-  severityThreshold: EventSeverity;
-  nearbyRadius: number; // in meters
-  soundEnabled: boolean;
+export interface DataQuality {
+  score: number;
+  completeness: number;
+  accuracy: number;
+  timeliness: number;
+  consistency: number;
+  issues: QualityIssue[];
 }
 
-/**
- * Event store state interface
- */
-interface EventStoreState {
-  // Raw event data
-  events: TrafficEvent[];
-  enhancedEvents: EnhancedTrafficEvent[];
-  
-  // Event selection and highlighting
-  selectedEvent: TrafficEvent | null;
-  highlightedEventIds: Set<string>;
-  
-  // User interactions
-  favoriteEventIds: Set<string>;
-  hiddenEventIds: Set<string>;
-  acknowledgedEventIds: Set<string>;
-  
-  // Event grouping and clustering
-  eventGroups: EventGroup[];
-  eventClusters: EventCluster[];
-  
-  // Loading and error states
-  isLoading: boolean;
-  isRefreshing: boolean;
-  error: Error | null;
-  lastFetchTime: Date | null;
-  lastUpdateTime: Date | null;
-  
-  // Statistics
-  statistics: EventStatistics;
-  
-  // Notifications
-  notificationConfig: NotificationConfig;
-  pendingNotifications: string[];
-  
-  // Cache management
-  cacheValidUntil: Date | null;
-  staleDataWarning: boolean;
+export interface QualityIssue {
+  eventId: string;
+  type: 'missing_data' | 'stale' | 'inconsistent' | 'duplicate';
+  description: string;
+  severity: 'low' | 'medium' | 'high';
 }
 
-/**
- * Event store actions interface
- */
-interface EventStoreActions {
-  // Event data management
-  setEvents: (events: TrafficEvent[]) => void;
-  updateEvent: (eventId: string, updates: Partial<TrafficEvent>) => void;
-  removeEvent: (eventId: string) => void;
-  clearEvents: () => void;
-  
-  // Event selection
-  selectEvent: (event: TrafficEvent | null) => void;
-  highlightEvents: (eventIds: string[]) => void;
-  clearHighlights: () => void;
-  
-  // User interactions
-  toggleFavorite: (eventId: string) => void;
-  hideEvent: (eventId: string) => void;
-  unhideEvent: (eventId: string) => void;
-  acknowledgeEvent: (eventId: string) => void;
-  clearAcknowledgements: () => void;
-  
-  // Batch operations
-  hideBulk: (eventIds: string[]) => void;
-  unhideAll: () => void;
-  
-  // Event enhancement and processing
-  enhanceEvents: () => void;
-  groupEvents: (groupBy: 'location' | 'type' | 'severity' | 'road') => void;
-  clusterEvents: (zoomLevel: number, bounds: any) => void;
-  
-  // Filtering helpers
-  getFilteredEvents: (filters: EventFilters) => TrafficEvent[];
-  getNearbyEvents: (center: MapCenter, radiusMeters: number) => TrafficEvent[];
-  getEventsByRoad: (roadName: string) => TrafficEvent[];
-  getEventsByArea: (areaName: string) => TrafficEvent[];
-  
-  // Statistics
-  updateStatistics: () => void;
-  
-  // Loading and error management
-  setLoading: (isLoading: boolean) => void;
-  setRefreshing: (isRefreshing: boolean) => void;
-  setError: (error: Error | null) => void;
-  
-  // Notification management
-  updateNotificationConfig: (config: Partial<NotificationConfig>) => void;
-  checkForNotifications: (userLocation?: MapCenter) => void;
-  dismissNotification: (eventId: string) => void;
-  
-  // Cache management
-  setCacheValidity: (validUntil: Date) => void;
-  invalidateCache: () => void;
-  checkCacheValidity: () => boolean;
-  
-  // Utility actions
-  reset: () => void;
-  exportEvents: () => string;
-  importEvents: (jsonData: string) => void;
+export interface BatchUpdate {
+  eventId: string;
+  changes: Partial<TrafficEvent>;
+  options?: { optimistic?: boolean; validate?: boolean };
 }
 
-/**
- * Event filters interface
- */
-interface EventFilters {
-  types?: EventType[];
-  severities?: EventSeverity[];
-  statuses?: EventStatus[];
-  closuresOnly?: boolean;
-  favoritesOnly?: boolean;
-  excludeHidden?: boolean;
-  searchTerm?: string;
-  startDate?: Date;
-  endDate?: Date;
+export type MergeStrategy = 'replace' | 'merge' | 'deep-merge' | 'custom';
+
+export interface ConflictResolution {
+  strategy: 'local' | 'remote' | 'merged';
+  mergedEvent?: TrafficEvent;
+  timestamp: number;
 }
 
-/**
- * Initial state factory
- */
-const createInitialState = (): EventStoreState => ({
-  events: [],
-  enhancedEvents: [],
-  selectedEvent: null,
-  highlightedEventIds: new Set(),
-  favoriteEventIds: new Set(),
-  hiddenEventIds: new Set(),
-  acknowledgedEventIds: new Set(),
-  eventGroups: [],
-  eventClusters: [],
-  isLoading: false,
-  isRefreshing: false,
-  error: null,
-  lastFetchTime: null,
-  lastUpdateTime: null,
-  statistics: {
-    total: 0,
-    active: 0,
-    closures: 0,
-    incidents: 0,
-    construction: 0,
-    specialEvents: 0,
-    bySeverity: {} as Record<EventSeverity, number>,
-    byType: {} as Record<EventType, number>,
-    byStatus: {} as Record<EventStatus, number>,
-    recentEvents: 0,
-    criticalEvents: 0,
-    affectedAreas: [],
-    affectedRoads: [],
-    averageAge: 0,
-    lastUpdateTime: null
-  },
-  notificationConfig: {
-    enabled: true,
-    closuresOnly: false,
-    severityThreshold: EventSeverity.MAJOR,
-    nearbyRadius: 5000,
-    soundEnabled: false
-  },
-  pendingNotifications: [],
-  cacheValidUntil: null,
-  staleDataWarning: false
-});
-
-/**
- * Calculate event statistics
- */
-const calculateStatistics = (events: TrafficEvent[]): EventStatistics => {
-  const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 3600000);
-  
-  const stats: EventStatistics = {
-    total: events.length,
-    active: 0,
-    closures: 0,
-    incidents: 0,
-    construction: 0,
-    specialEvents: 0,
-    bySeverity: {} as Record<EventSeverity, number>,
-    byType: {} as Record<EventType, number>,
-    byStatus: {} as Record<EventStatus, number>,
-    recentEvents: 0,
-    criticalEvents: 0,
-    affectedAreas: [],
-    affectedRoads: [],
-    averageAge: 0,
-    lastUpdateTime: now
+export interface ExportedState {
+  events: Array<[string, TrafficEvent]>;
+  metadata: {
+    exportedAt: string;
+    syncId: string;
+    version: string;
+    eventCount: number;
   };
+}
 
-  const areas = new Set<string>();
-  const roads = new Set<string>();
-  let totalAge = 0;
+export interface IntegrityReport {
+  valid: boolean;
+  issues: string[];
+  orphanedEvents: string[];
+  missingVersions: string[];
+  inconsistentData: Array<{ eventId: string; issue: string }>;
+}
 
-  events.forEach(event => {
-    // Count by status
-    if (event.status === EventStatus.ACTIVE) {
-      stats.active++;
-    }
-    stats.byStatus[event.status] = (stats.byStatus[event.status] || 0) + 1;
+// ============================================================================
+// Helper Functions
+// ============================================================================
 
-    // Count closures
-    if (isRoadClosure(event)) {
-      stats.closures++;
-    }
+/**
+ * Generate unique sync ID
+ */
+function generateSyncId(): string {
+  return `sync-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+}
 
-    // Count by type
-    stats.byType[event.event_type] = (stats.byType[event.event_type] || 0) + 1;
-    switch (event.event_type) {
-      case EventType.INCIDENT:
-        stats.incidents++;
-        break;
-      case EventType.CONSTRUCTION:
-        stats.construction++;
-        break;
-      case EventType.SPECIAL_EVENT:
-        stats.specialEvents++;
-        break;
-    }
-
-    // Count by severity
-    stats.bySeverity[event.severity] = (stats.bySeverity[event.severity] || 0) + 1;
-    if (event.severity === EventSeverity.SEVERE) {
-      stats.criticalEvents++;
-    }
-
-    // Check if recent
-    const eventTime = new Date(event.updated || event.created);
-    if (eventTime > oneHourAgo) {
-      stats.recentEvents++;
-    }
-
-    // Calculate age
-    totalAge += (now.getTime() - eventTime.getTime()) / 60000; // in minutes
-
-    // Collect areas and roads
-    event.areas?.forEach(area => areas.add(area.name));
-    event.roads?.forEach(road => roads.add(road.name));
+/**
+ * Calculate event hash for version tracking
+ */
+function calculateEventHash(event: TrafficEvent): string {
+  const content = JSON.stringify({
+    id: event.id,
+    status: event.status,
+    severity: event.severity,
+    updated: event.updated,
+    headline: event.headline
   });
-
-  stats.affectedAreas = Array.from(areas).sort();
-  stats.affectedRoads = Array.from(roads).sort();
-  stats.averageAge = events.length > 0 ? Math.round(totalAge / events.length) : 0;
-
-  return stats;
-};
-
-/**
- * Enhance events with computed properties
- */
-const enhanceEvent = (event: TrafficEvent): EnhancedTrafficEvent => {
-  const now = new Date();
-  const eventTime = new Date(event.updated || event.created);
-  const ageMinutes = (now.getTime() - eventTime.getTime()) / 60000;
-
-  return {
-    ...event,
-    isClosure: isRoadClosure(event),
-    isRecent: ageMinutes < 60,
-    isStale: ageMinutes > 1440, // 24 hours
-    primaryRoad: event.roads?.[0]?.name || 'Unknown Road',
-    impactLevel: getEventImpactLevel(event),
-    displayPriority: calculateDisplayPriority(event),
-    estimatedDuration: estimateEventDuration(event)
-  };
-};
-
-/**
- * Calculate display priority for event
- */
-const calculateDisplayPriority = (event: TrafficEvent): number => {
-  let priority = 0;
-
-  // Severity weighting
-  const severityWeights = {
-    [EventSeverity.SEVERE]: 100,
-    [EventSeverity.MAJOR]: 75,
-    [EventSeverity.MODERATE]: 50,
-    [EventSeverity.MINOR]: 25,
-    [EventSeverity.UNKNOWN]: 10
-  };
-  priority += severityWeights[event.severity] || 0;
-
-  // Closure bonus
-  if (isRoadClosure(event)) {
-    priority += 50;
+  
+  let hash = 0;
+  for (let i = 0; i < content.length; i++) {
+    const char = content.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
   }
-
-  // Recency bonus
-  const ageMinutes = (Date.now() - new Date(event.updated || event.created).getTime()) / 60000;
-  if (ageMinutes < 30) priority += 30;
-  else if (ageMinutes < 60) priority += 20;
-  else if (ageMinutes < 180) priority += 10;
-
-  return priority;
-};
+  
+  return Math.abs(hash).toString(36);
+}
 
 /**
- * Estimate event duration based on type and severity
+ * Check if event is a closure
  */
-const estimateEventDuration = (event: TrafficEvent): number => {
-  // Base duration by type (in minutes)
-  const baseDuration = {
-    [EventType.INCIDENT]: 45,
-    [EventType.CONSTRUCTION]: 240,
-    [EventType.SPECIAL_EVENT]: 180,
-    [EventType.ROAD_CONDITION]: 120,
-    [EventType.WEATHER_CONDITION]: 90
-  };
-
-  // Severity multiplier
-  const severityMultiplier = {
-    [EventSeverity.SEVERE]: 2.0,
-    [EventSeverity.MAJOR]: 1.5,
-    [EventSeverity.MODERATE]: 1.0,
-    [EventSeverity.MINOR]: 0.5,
-    [EventSeverity.UNKNOWN]: 1.0
-  };
-
-  const base = baseDuration[event.event_type] || 60;
-  const multiplier = severityMultiplier[event.severity] || 1.0;
-
-  return Math.round(base * multiplier);
-};
+function isClosureEvent(event: TrafficEvent): boolean {
+  return event.roads?.some(road => road.state === RoadState.CLOSED) ||
+         event.event_type === EventType.ROAD_CLOSURE ||
+         event.event_subtypes?.includes('road-closure') ||
+         false;
+}
 
 /**
- * Create the event store with Zustand
+ * Calculate distance between two points
  */
-export const useEventStore = create<EventStoreState & EventStoreActions>()(
+function calculateDistance(
+  lat1: number, 
+  lng1: number, 
+  lat2: number, 
+  lng2: number
+): number {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+            Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+            Math.sin(dLng/2) * Math.sin(dLng/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// ============================================================================
+// Store Implementation
+// ============================================================================
+
+export const useEventStore = create<EventStoreState>()(
   devtools(
     persist(
       subscribeWithSelector(
         immer((set, get) => ({
-          ...createInitialState(),
+          // ===== Initial State =====
+          events: new Map(),
+          eventOrder: [],
+          eventVersions: new Map(),
+          lastSyncTimestamp: null,
+          syncId: generateSyncId(),
+          syncStatus: 'idle',
+          syncProgress: 0,
+          pendingChanges: new Map(),
+          conflicts: new Map(),
+          optimisticUpdates: new Map(),
+          selectedEventId: null,
+          highlightedEventIds: new Set(),
+          favoriteEventIds: new Set(),
+          hiddenEventIds: new Set(),
+          expandedEventIds: new Set(),
+          viewMode: 'map',
+          groupBy: 'none',
+          sortBy: 'severity',
+          sortDirection: 'desc',
+          statistics: {
+            total: 0,
+            active: 0,
+            closures: 0,
+            incidents: 0,
+            construction: 0,
+            bySeverity: {
+              [EventSeverity.MINOR]: 0,
+              [EventSeverity.MODERATE]: 0,
+              [EventSeverity.MAJOR]: 0,
+              [EventSeverity.SEVERE]: 0
+            },
+            byType: {} as Record<EventType, number>,
+            recentlyUpdated: 0,
+            averageAge: 0,
+            updateFrequency: 0
+          },
+          lastUpdated: null,
+          isLoading: false,
+          error: null,
+          dataQuality: {
+            score: 100,
+            completeness: 100,
+            accuracy: 100,
+            timeliness: 100,
+            consistency: 100,
+            issues: []
+          },
 
-          // Event data management
-          setEvents: (events) => set(state => {
-            state.events = events;
-            state.lastUpdateTime = new Date();
-            state.staleDataWarning = false;
-            // Trigger enhancement
-            get().enhanceEvents();
+          // ===== Event Management Actions =====
+          setEvents: (events) => set((state) => {
+            state.events.clear();
+            state.eventOrder = [];
+            state.eventVersions.clear();
+            
+            for (const event of events) {
+              state.events.set(event.id, event);
+              state.eventOrder.push(event.id);
+              state.eventVersions.set(event.id, {
+                id: event.id,
+                version: calculateEventHash(event),
+                updated: event.updated,
+                hash: calculateEventHash(event),
+                source: 'remote'
+              });
+            }
+            
+            state.lastUpdated = new Date();
+            state.error = null;
             get().updateStatistics();
+            get().calculateDataQuality();
           }),
 
-          updateEvent: (eventId, updates) => set(state => {
-            const index = state.events.findIndex(e => e.id === eventId);
-            if (index !== -1) {
-              state.events[index] = { ...state.events[index], ...updates };
-              get().enhanceEvents();
+          addEvent: (event) => set((state) => {
+            if (!state.events.has(event.id)) {
+              state.events.set(event.id, event);
+              state.eventOrder.push(event.id);
+              state.eventVersions.set(event.id, {
+                id: event.id,
+                version: calculateEventHash(event),
+                updated: event.updated,
+                hash: calculateEventHash(event),
+                source: 'remote'
+              });
               get().updateStatistics();
             }
           }),
 
-          removeEvent: (eventId) => set(state => {
-            state.events = state.events.filter(e => e.id !== eventId);
-            if (state.selectedEvent?.id === eventId) {
-              state.selectedEvent = null;
+          updateEvent: (event) => set((state) => {
+            const existingEvent = state.events.get(event.id);
+            
+            if (existingEvent) {
+              // Check for conflicts if there are pending changes
+              const pendingChange = state.pendingChanges.get(event.id);
+              if (pendingChange) {
+                state.conflicts.set(event.id, {
+                  id: event.id,
+                  reason: 'concurrent-modification',
+                  localChanges: pendingChange.changes,
+                  remoteChanges: event
+                });
+              }
+              
+              state.events.set(event.id, event);
+              state.eventVersions.set(event.id, {
+                id: event.id,
+                version: calculateEventHash(event),
+                updated: event.updated,
+                hash: calculateEventHash(event),
+                source: 'remote'
+              });
+              
+              get().updateStatistics();
+            } else {
+              get().addEvent(event);
             }
-            state.highlightedEventIds.delete(eventId);
-            get().enhanceEvents();
-            get().updateStatistics();
           }),
 
-          clearEvents: () => set(state => {
-            state.events = [];
-            state.enhancedEvents = [];
-            state.selectedEvent = null;
+          removeEvent: (eventId) => {
+            const state = get();
+            if (state.events.has(eventId)) {
+              set((draft) => {
+                draft.events.delete(eventId);
+                draft.eventOrder = draft.eventOrder.filter(id => id !== eventId);
+                draft.eventVersions.delete(eventId);
+                draft.pendingChanges.delete(eventId);
+                draft.conflicts.delete(eventId);
+                draft.optimisticUpdates.delete(eventId);
+                draft.hiddenEventIds.delete(eventId);
+                draft.favoriteEventIds.delete(eventId);
+                draft.highlightedEventIds.delete(eventId);
+                draft.expandedEventIds.delete(eventId);
+                
+                if (draft.selectedEventId === eventId) {
+                  draft.selectedEventId = null;
+                }
+              });
+              
+              get().updateStatistics();
+              return true;
+            }
+            return false;
+          },
+
+          clearEvents: () => set((state) => {
+            state.events.clear();
+            state.eventOrder = [];
+            state.eventVersions.clear();
+            state.pendingChanges.clear();
+            state.conflicts.clear();
+            state.optimisticUpdates.clear();
+            state.selectedEventId = null;
             state.highlightedEventIds.clear();
-            state.eventGroups = [];
-            state.eventClusters = [];
+            state.lastUpdated = null;
             get().updateStatistics();
           }),
 
-          // Event selection
-          selectEvent: (event) => set(state => {
-            state.selectedEvent = event;
+          replaceAllEvents: (events) => {
+            get().clearEvents();
+            get().setEvents(events);
+          },
+
+          // ===== Differential Sync Actions =====
+          applyDifferential: (diff) => {
+            const result: SyncResult = {
+              success: true,
+              applied: [],
+              conflicts: [],
+              failed: [],
+              rollback: null,
+              statistics: {
+                totalProcessed: 0,
+                successCount: 0,
+                conflictCount: 0,
+                failureCount: 0,
+                processingTimeMs: 0,
+                dataSizeBytes: 0
+              }
+            };
+
+            const startTime = Date.now();
+
+            set((state) => {
+              // Process deletions
+              for (const id of diff.deleted) {
+                if (state.events.delete(id)) {
+                  state.eventOrder = state.eventOrder.filter(eid => eid !== id);
+                  state.eventVersions.delete(id);
+                  result.applied.push({ type: 'delete', id, timestamp: Date.now() });
+                }
+              }
+
+              // Process additions
+              for (const event of diff.added) {
+                state.events.set(event.id, event);
+                if (!state.eventOrder.includes(event.id)) {
+                  state.eventOrder.push(event.id);
+                }
+                state.eventVersions.set(event.id, {
+                  id: event.id,
+                  version: calculateEventHash(event),
+                  updated: event.updated,
+                  hash: calculateEventHash(event),
+                  source: 'remote'
+                });
+                result.applied.push({ type: 'add', id: event.id, timestamp: Date.now() });
+              }
+
+              // Process updates
+              for (const event of diff.updated) {
+                const existingEvent = state.events.get(event.id);
+                const pendingChange = state.pendingChanges.get(event.id);
+                
+                if (pendingChange && existingEvent) {
+                  // Conflict detected
+                  state.conflicts.set(event.id, {
+                    id: event.id,
+                    reason: 'concurrent-modification',
+                    localChanges: pendingChange.changes,
+                    remoteChanges: event
+                  });
+                  result.conflicts.push({
+                    id: event.id,
+                    reason: 'concurrent-modification',
+                    localChanges: pendingChange.changes,
+                    remoteChanges: event
+                  });
+                  result.statistics.conflictCount++;
+                } else {
+                  // No conflict, apply update
+                  state.events.set(event.id, event);
+                  state.eventVersions.set(event.id, {
+                    id: event.id,
+                    version: calculateEventHash(event),
+                    updated: event.updated,
+                    hash: calculateEventHash(event),
+                    source: 'remote'
+                  });
+                  result.applied.push({ 
+                    type: 'update', 
+                    id: event.id, 
+                    timestamp: Date.now() 
+                  });
+                }
+              }
+
+              state.lastSyncTimestamp = diff.timestamp;
+              state.syncStatus = result.conflicts.length > 0 ? 'conflict' : 'success';
+              state.lastUpdated = new Date();
+            });
+
+            result.statistics = {
+              totalProcessed: diff.added.length + diff.updated.length + diff.deleted.length,
+              successCount: result.applied.length,
+              conflictCount: result.conflicts.length,
+              failureCount: result.failed.length,
+              processingTimeMs: Date.now() - startTime,
+              dataSizeBytes: JSON.stringify(diff).length
+            };
+
+            get().updateStatistics();
+            get().calculateDataQuality();
+
+            return result;
+          },
+
+          mergeDifferential: (diff, strategy) => set((state) => {
+            // Implementation depends on merge strategy
+            switch (strategy) {
+              case 'replace':
+                // Replace with remote version
+                for (const event of [...diff.added, ...diff.updated]) {
+                  state.events.set(event.id, event);
+                  state.pendingChanges.delete(event.id);
+                  state.conflicts.delete(event.id);
+                }
+                break;
+
+              case 'merge':
+                // Simple merge - combine fields
+                for (const event of [...diff.added, ...diff.updated]) {
+                  const existing = state.events.get(event.id);
+                  if (existing) {
+                    state.events.set(event.id, { ...existing, ...event });
+                  } else {
+                    state.events.set(event.id, event);
+                  }
+                }
+                break;
+
+              case 'deep-merge':
+                // Deep merge - recursive merge
+                for (const event of [...diff.added, ...diff.updated]) {
+                  const existing = state.events.get(event.id);
+                  if (existing) {
+                    // Deep merge logic here
+                    const merged = deepMerge(existing, event);
+                    state.events.set(event.id, merged);
+                  } else {
+                    state.events.set(event.id, event);
+                  }
+                }
+                break;
+
+              default:
+                break;
+            }
+
+            // Remove deleted events
+            for (const id of diff.deleted) {
+              state.events.delete(id);
+              state.eventOrder = state.eventOrder.filter(eid => eid !== id);
+            }
+
+            state.lastSyncTimestamp = diff.timestamp;
+            get().updateStatistics();
+          }),
+
+          trackLocalChange: (eventId, changes) => set((state) => {
+            const existing = state.pendingChanges.get(eventId) || {
+              id: eventId,
+              timestamp: Date.now(),
+              changes: {},
+              type: 'local' as const
+            };
+            
+            state.pendingChanges.set(eventId, {
+              ...existing,
+              changes: { ...existing.changes, ...changes },
+              timestamp: Date.now()
+            });
+
+            // Apply optimistically if enabled
+            const event = state.events.get(eventId);
             if (event) {
-              state.highlightedEventIds.clear();
-              state.highlightedEventIds.add(event.id);
+              const optimisticEvent = { ...event, ...changes };
+              
+              state.optimisticUpdates.set(eventId, {
+                id: `opt-${eventId}-${Date.now()}`,
+                originalEvent: event,
+                optimisticEvent,
+                timestamp: Date.now(),
+                confirmed: false
+              });
+              
+              state.events.set(eventId, optimisticEvent);
+              state.eventVersions.set(eventId, {
+                ...state.eventVersions.get(eventId)!,
+                source: 'local'
+              });
             }
           }),
 
-          highlightEvents: (eventIds) => set(state => {
-            state.highlightedEventIds = new Set(eventIds);
+          resolveConflict: (eventId, resolution) => set((state) => {
+            const conflict = state.conflicts.get(eventId);
+            if (!conflict) return;
+
+            switch (resolution.strategy) {
+              case 'local':
+                // Keep local version
+                const pending = state.pendingChanges.get(eventId);
+                if (pending) {
+                  const event = state.events.get(eventId);
+                  if (event) {
+                    state.events.set(eventId, { ...event, ...pending.changes });
+                  }
+                }
+                break;
+
+              case 'remote':
+                // Use remote version
+                state.pendingChanges.delete(eventId);
+                state.optimisticUpdates.delete(eventId);
+                // Event should already be updated from differential
+                break;
+
+              case 'merged':
+                // Use provided merged version
+                if (resolution.mergedEvent) {
+                  state.events.set(eventId, resolution.mergedEvent);
+                  state.pendingChanges.delete(eventId);
+                }
+                break;
+            }
+
+            state.conflicts.delete(eventId);
+            get().updateStatistics();
           }),
 
-          clearHighlights: () => set(state => {
-            state.highlightedEventIds.clear();
+          clearPendingChanges: () => set((state) => {
+            state.pendingChanges.clear();
+            state.optimisticUpdates.clear();
+            
+            // Revert optimistic updates
+            for (const [eventId, update] of state.optimisticUpdates) {
+              if (!update.confirmed) {
+                state.events.set(eventId, update.originalEvent);
+              }
+            }
           }),
 
-          // User interactions
-          toggleFavorite: (eventId) => set(state => {
+          rollbackOptimisticUpdate: (updateId) => set((state) => {
+            for (const [eventId, update] of state.optimisticUpdates) {
+              if (update.id === updateId && !update.confirmed) {
+                state.events.set(eventId, update.originalEvent);
+                state.optimisticUpdates.delete(eventId);
+                break;
+              }
+            }
+          }),
+
+          // ===== Selection & UI Actions =====
+          selectEvent: (eventId) => set((state) => {
+            state.selectedEventId = eventId;
+          }),
+
+          toggleHighlight: (eventId) => set((state) => {
+            if (state.highlightedEventIds.has(eventId)) {
+              state.highlightedEventIds.delete(eventId);
+            } else {
+              state.highlightedEventIds.add(eventId);
+            }
+          }),
+
+          toggleFavorite: (eventId) => set((state) => {
             if (state.favoriteEventIds.has(eventId)) {
               state.favoriteEventIds.delete(eventId);
             } else {
@@ -452,294 +710,466 @@ export const useEventStore = create<EventStoreState & EventStoreActions>()(
             }
           }),
 
-          hideEvent: (eventId) => set(state => {
+          hideEvent: (eventId) => set((state) => {
             state.hiddenEventIds.add(eventId);
-            if (state.selectedEvent?.id === eventId) {
-              state.selectedEvent = null;
-            }
           }),
 
-          unhideEvent: (eventId) => set(state => {
+          unhideEvent: (eventId) => set((state) => {
             state.hiddenEventIds.delete(eventId);
           }),
 
-          acknowledgeEvent: (eventId) => set(state => {
-            state.acknowledgedEventIds.add(eventId);
-            // Remove from pending notifications
-            state.pendingNotifications = state.pendingNotifications.filter(id => id !== eventId);
+          toggleExpanded: (eventId) => set((state) => {
+            if (state.expandedEventIds.has(eventId)) {
+              state.expandedEventIds.delete(eventId);
+            } else {
+              state.expandedEventIds.add(eventId);
+            }
           }),
 
-          clearAcknowledgements: () => set(state => {
-            state.acknowledgedEventIds.clear();
+          clearSelection: () => set((state) => {
+            state.selectedEventId = null;
+            state.highlightedEventIds.clear();
           }),
 
-          // Batch operations
-          hideBulk: (eventIds) => set(state => {
-            eventIds.forEach(id => state.hiddenEventIds.add(id));
-          }),
-
-          unhideAll: () => set(state => {
-            state.hiddenEventIds.clear();
-          }),
-
-          // Event enhancement
-          enhanceEvents: () => set(state => {
-            state.enhancedEvents = state.events.map(enhanceEvent);
-          }),
-
-          // Event grouping
-          groupEvents: (groupBy) => set(state => {
-            const groups: Map<string, TrafficEvent[]> = new Map();
+          // ===== Batch Operations =====
+          batchUpdate: (updates) => set((state) => {
+            for (const update of updates) {
+              const event = state.events.get(update.eventId);
+              if (event) {
+                const updatedEvent = { ...event, ...update.changes };
+                
+                if (update.options?.optimistic) {
+                  state.optimisticUpdates.set(update.eventId, {
+                    id: `batch-${update.eventId}-${Date.now()}`,
+                    originalEvent: event,
+                    optimisticEvent: updatedEvent,
+                    timestamp: Date.now(),
+                    confirmed: false
+                  });
+                }
+                
+                state.events.set(update.eventId, updatedEvent);
+                state.eventVersions.set(update.eventId, {
+                  id: update.eventId,
+                  version: calculateEventHash(updatedEvent),
+                  updated: updatedEvent.updated,
+                  hash: calculateEventHash(updatedEvent),
+                  source: 'local'
+                });
+              }
+            }
             
-            state.events.forEach(event => {
-              let key: string;
-              
-              switch (groupBy) {
-                case 'type':
-                  key = event.event_type;
-                  break;
-                case 'severity':
-                  key = event.severity;
-                  break;
-                case 'road':
-                  key = event.roads?.[0]?.name || 'Unknown';
-                  break;
-                case 'location':
-                  key = event.areas?.[0]?.name || 'Unknown';
-                  break;
-                default:
-                  key = 'Other';
+            get().updateStatistics();
+          }),
+
+          batchDelete: (eventIds) => {
+            for (const id of eventIds) {
+              get().removeEvent(id);
+            }
+          },
+
+          applyFilter: (predicate) => set((state) => {
+            const eventsToHide: string[] = [];
+            
+            for (const [id, event] of state.events) {
+              if (!predicate(event)) {
+                eventsToHide.push(id);
               }
-              
-              if (!groups.has(key)) {
-                groups.set(key, []);
-              }
-              groups.get(key)!.push(event);
-            });
-
-            state.eventGroups = Array.from(groups.entries()).map(([name, events]) => ({
-              id: name,
-              name,
-              type: groupBy,
-              events,
-              count: events.length
-            }));
-          }),
-
-          // Event clustering (simplified - full implementation would use clustering algorithm)
-          clusterEvents: (zoomLevel, bounds) => set(state => {
-            // This is a simplified clustering - production would use supercluster or similar
-            const clusters: EventCluster[] = [];
-            const processedEvents = new Set<string>();
-
-            state.events.forEach(event => {
-              if (processedEvents.has(event.id)) return;
-              if (!event.geography?.coordinates) return;
-
-              const cluster: EventCluster = {
-                id: `cluster-${event.id}`,
-                center: {
-                  lat: event.geography.coordinates[1],
-                  lng: event.geography.coordinates[0]
-                },
-                bounds: {
-                  north: event.geography.coordinates[1],
-                  south: event.geography.coordinates[1],
-                  east: event.geography.coordinates[0],
-                  west: event.geography.coordinates[0]
-                },
-                events: [event],
-                count: 1,
-                severityCounts: { [event.severity]: 1 } as any,
-                typeCounts: { [event.event_type]: 1 } as any
-              };
-
-              processedEvents.add(event.id);
-              clusters.push(cluster);
-            });
-
-            state.eventClusters = clusters;
-          }),
-
-          // Filtering helpers
-          getFilteredEvents: (filters) => {
-            const state = get();
-            let filtered = [...state.events];
-
-            if (filters.types?.length) {
-              filtered = filtered.filter(e => filters.types!.includes(e.event_type));
             }
-            if (filters.severities?.length) {
-              filtered = filtered.filter(e => filters.severities!.includes(e.severity));
-            }
-            if (filters.statuses?.length) {
-              filtered = filtered.filter(e => filters.statuses!.includes(e.status));
-            }
-            if (filters.closuresOnly) {
-              filtered = filtered.filter(isRoadClosure);
-            }
-            if (filters.favoritesOnly) {
-              filtered = filtered.filter(e => state.favoriteEventIds.has(e.id));
-            }
-            if (filters.excludeHidden) {
-              filtered = filtered.filter(e => !state.hiddenEventIds.has(e.id));
-            }
-            if (filters.searchTerm) {
-              const term = filters.searchTerm.toLowerCase();
-              filtered = filtered.filter(e =>
-                e.headline?.toLowerCase().includes(term) ||
-                e.description?.toLowerCase().includes(term) ||
-                e.roads?.some(r => r.name?.toLowerCase().includes(term))
-              );
-            }
-            if (filters.startDate) {
-              filtered = filtered.filter(e =>
-                new Date(e.created) >= filters.startDate!
-              );
-            }
-            if (filters.endDate) {
-              filtered = filtered.filter(e =>
-                new Date(e.created) <= filters.endDate!
-              );
-            }
-
-            return filtered;
-          },
-
-          getNearbyEvents: (center, radiusMeters) => {
-            return get().events.filter(event => {
-              if (!event.geography?.coordinates) return false;
-              const distance = calculateDistance(
-                center,
-                { lat: event.geography.coordinates[1], lng: event.geography.coordinates[0] }
-              );
-              return distance <= radiusMeters;
-            });
-          },
-
-          getEventsByRoad: (roadName) => {
-            const term = roadName.toLowerCase();
-            return get().events.filter(event =>
-              event.roads?.some(road => road.name?.toLowerCase().includes(term))
-            );
-          },
-
-          getEventsByArea: (areaName) => {
-            const term = areaName.toLowerCase();
-            return get().events.filter(event =>
-              event.areas?.some(area => area.name?.toLowerCase().includes(term))
-            );
-          },
-
-          // Statistics
-          updateStatistics: () => set(state => {
-            state.statistics = calculateStatistics(state.events);
-          }),
-
-          // Loading and error management
-          setLoading: (isLoading) => set({ isLoading }),
-          setRefreshing: (isRefreshing) => set({ isRefreshing }),
-          setError: (error) => set({ error }),
-
-          // Notification management
-          updateNotificationConfig: (config) => set(state => {
-            state.notificationConfig = { ...state.notificationConfig, ...config };
-          }),
-
-          checkForNotifications: (userLocation) => set(state => {
-            if (!state.notificationConfig.enabled) return;
-
-            const newNotifications: string[] = [];
-            const recentThreshold = Date.now() - 300000; // 5 minutes
-
-            state.events.forEach(event => {
-              // Skip if already acknowledged
-              if (state.acknowledgedEventIds.has(event.id)) return;
-              // Skip if already in pending
-              if (state.pendingNotifications.includes(event.id)) return;
-              // Skip if not recent
-              if (new Date(event.created).getTime() < recentThreshold) return;
-
-              // Check severity threshold
-              const severityLevels = [
-                EventSeverity.MINOR,
-                EventSeverity.MODERATE,
-                EventSeverity.MAJOR,
-                EventSeverity.SEVERE
-              ];
-              const eventLevel = severityLevels.indexOf(event.severity);
-              const thresholdLevel = severityLevels.indexOf(state.notificationConfig.severityThreshold);
-              if (eventLevel < thresholdLevel) return;
-
-              // Check if closure-only filter
-              if (state.notificationConfig.closuresOnly && !isRoadClosure(event)) return;
-
-              // Check proximity if location provided
-              if (userLocation && event.geography?.coordinates) {
-                const distance = calculateDistance(
-                  userLocation,
-                  { lat: event.geography.coordinates[1], lng: event.geography.coordinates[0] }
-                );
-                if (distance > state.notificationConfig.nearbyRadius) return;
-              }
-
-              newNotifications.push(event.id);
-            });
-
-            if (newNotifications.length > 0) {
-              state.pendingNotifications = [...state.pendingNotifications, ...newNotifications];
+            
+            for (const id of eventsToHide) {
+              state.hiddenEventIds.add(id);
             }
           }),
 
-          dismissNotification: (eventId) => set(state => {
-            state.pendingNotifications = state.pendingNotifications.filter(id => id !== eventId);
-            state.acknowledgedEventIds.add(eventId);
+          // ===== View Management =====
+          setViewMode: (mode) => set((state) => {
+            state.viewMode = mode;
           }),
 
-          // Cache management
-          setCacheValidity: (validUntil) => set({ cacheValidUntil: validUntil }),
-          
-          invalidateCache: () => set({
-            cacheValidUntil: null,
-            staleDataWarning: true
+          setGroupBy: (groupBy) => set((state) => {
+            state.groupBy = groupBy;
           }),
 
-          checkCacheValidity: () => {
-            const { cacheValidUntil } = get();
-            if (!cacheValidUntil) return false;
-            return new Date() < cacheValidUntil;
-          },
+          setSorting: (sortBy, direction) => set((state) => {
+            state.sortBy = sortBy;
+            if (direction) {
+              state.sortDirection = direction;
+            }
+          }),
 
-          // Utility actions
-          reset: () => set(createInitialState()),
+          // ===== Sync Management =====
+          updateSyncTimestamp: (timestamp) => set((state) => {
+            state.lastSyncTimestamp = timestamp;
+          }),
 
-          exportEvents: () => {
-            const state = get();
-            const exportData = {
-              events: state.events,
-              favorites: Array.from(state.favoriteEventIds),
-              hidden: Array.from(state.hiddenEventIds),
-              timestamp: new Date().toISOString(),
-              version: '1.0.0'
+          setSyncStatus: (status) => set((state) => {
+            state.syncStatus = status;
+          }),
+
+          setSyncProgress: (progress) => set((state) => {
+            state.syncProgress = Math.min(100, Math.max(0, progress));
+          }),
+
+          resetSyncState: () => set((state) => {
+            state.lastSyncTimestamp = null;
+            state.syncStatus = 'idle';
+            state.syncProgress = 0;
+            state.pendingChanges.clear();
+            state.conflicts.clear();
+            state.optimisticUpdates.clear();
+            state.syncId = generateSyncId();
+          }),
+
+          // ===== Statistics =====
+          updateStatistics: () => set((state) => {
+            const events = Array.from(state.events.values());
+            const now = Date.now();
+            const recentThreshold = now - 3600000; // 1 hour
+            
+            const stats: EventStatistics = {
+              total: events.length,
+              active: 0,
+              closures: 0,
+              incidents: 0,
+              construction: 0,
+              bySeverity: {
+                [EventSeverity.MINOR]: 0,
+                [EventSeverity.MODERATE]: 0,
+                [EventSeverity.MAJOR]: 0,
+                [EventSeverity.SEVERE]: 0
+              },
+              byType: {} as Record<EventType, number>,
+              recentlyUpdated: 0,
+              averageAge: 0,
+              updateFrequency: 0
             };
-            return JSON.stringify(exportData, null, 2);
+
+            let totalAge = 0;
+
+            for (const event of events) {
+              if (event.status === 'ACTIVE') stats.active++;
+              if (isClosureEvent(event)) stats.closures++;
+              if (event.event_type === EventType.INCIDENT) stats.incidents++;
+              if (event.event_type === EventType.CONSTRUCTION) stats.construction++;
+              
+              stats.bySeverity[event.severity]++;
+              stats.byType[event.event_type] = (stats.byType[event.event_type] || 0) + 1;
+              
+              const updatedTime = new Date(event.updated).getTime();
+              if (updatedTime > recentThreshold) {
+                stats.recentlyUpdated++;
+              }
+              
+              totalAge += (now - updatedTime) / 60000; // Convert to minutes
+            }
+
+            stats.averageAge = events.length > 0 ? Math.floor(totalAge / events.length) : 0;
+            
+            // Calculate update frequency (updates per hour)
+            const updateTimes = events
+              .map(e => new Date(e.updated).getTime())
+              .sort((a, b) => b - a);
+            
+            if (updateTimes.length > 1) {
+              const timeDiff = updateTimes[0] - updateTimes[updateTimes.length - 1];
+              const hours = timeDiff / 3600000;
+              stats.updateFrequency = hours > 0 ? updateTimes.length / hours : 0;
+            }
+
+            state.statistics = stats;
+          }),
+
+          calculateDataQuality: () => set((state) => {
+            const events = Array.from(state.events.values());
+            const issues: QualityIssue[] = [];
+            let completenessScore = 100;
+            let accuracyScore = 100;
+            let timelinessScore = 100;
+            let consistencyScore = 100;
+            
+            const now = Date.now();
+            const staleThreshold = 24 * 3600000; // 24 hours
+            
+            for (const event of events) {
+              let eventIssues = 0;
+              
+              // Completeness checks
+              if (!event.headline) {
+                issues.push({
+                  eventId: event.id,
+                  type: 'missing_data',
+                  description: 'Missing headline',
+                  severity: 'medium'
+                });
+                eventIssues++;
+              }
+              
+              if (!event.description) {
+                issues.push({
+                  eventId: event.id,
+                  type: 'missing_data',
+                  description: 'Missing description',
+                  severity: 'low'
+                });
+                eventIssues++;
+              }
+              
+              if (!event.geography) {
+                issues.push({
+                  eventId: event.id,
+                  type: 'missing_data',
+                  description: 'Missing location data',
+                  severity: 'high'
+                });
+                eventIssues++;
+              }
+              
+              // Timeliness checks
+              const age = now - new Date(event.updated).getTime();
+              if (age > staleThreshold) {
+                issues.push({
+                  eventId: event.id,
+                  type: 'stale',
+                  description: `Data is ${Math.floor(age / 3600000)} hours old`,
+                  severity: 'medium'
+                });
+                timelinessScore -= 2;
+              }
+              
+              // Deduct from completeness score
+              completenessScore -= eventIssues * 2;
+            }
+            
+            // Check for duplicates (consistency)
+            const seenEvents = new Map<string, string>();
+            for (const event of events) {
+              const key = `${event.headline}-${event.event_type}-${event.severity}`;
+              if (seenEvents.has(key)) {
+                issues.push({
+                  eventId: event.id,
+                  type: 'duplicate',
+                  description: `Possible duplicate of ${seenEvents.get(key)}`,
+                  severity: 'low'
+                });
+                consistencyScore -= 5;
+              } else {
+                seenEvents.set(key, event.id);
+              }
+            }
+            
+            // Calculate overall score
+            const score = Math.max(0, Math.min(100,
+              (completenessScore + accuracyScore + timelinessScore + consistencyScore) / 4
+            ));
+            
+            state.dataQuality = {
+              score,
+              completeness: Math.max(0, completenessScore),
+              accuracy: accuracyScore,
+              timeliness: Math.max(0, timelinessScore),
+              consistency: Math.max(0, consistencyScore),
+              issues
+            };
+          }),
+
+          // ===== Getters =====
+          getEvent: (eventId) => {
+            return get().events.get(eventId);
           },
 
-          importEvents: (jsonData) => {
-            try {
-              const data = JSON.parse(jsonData);
-              set(state => {
-                if (data.events) state.events = data.events;
-                if (data.favorites) state.favoriteEventIds = new Set(data.favorites);
-                if (data.hidden) state.hiddenEventIds = new Set(data.hidden);
+          getAllEvents: () => {
+            return Array.from(get().events.values());
+          },
+
+          getVisibleEvents: () => {
+            const state = get();
+            return Array.from(state.events.values())
+              .filter(event => !state.hiddenEventIds.has(event.id));
+          },
+
+          getEventsByType: (type) => {
+            return Array.from(get().events.values())
+              .filter(event => event.event_type === type);
+          },
+
+          getEventsBySeverity: (severity) => {
+            return Array.from(get().events.values())
+              .filter(event => event.severity === severity);
+          },
+
+          getClosureEvents: () => {
+            return Array.from(get().events.values())
+              .filter(isClosureEvent);
+          },
+
+          getRecentEvents: (hoursAgo) => {
+            const threshold = Date.now() - (hoursAgo * 3600000);
+            return Array.from(get().events.values())
+              .filter(event => new Date(event.updated).getTime() > threshold);
+          },
+
+          getNearbyEvents: (lat, lng, radiusKm) => {
+            return Array.from(get().events.values())
+              .filter(event => {
+                if (!event.geography?.coordinates) return false;
+                
+                if (event.geography.type === 'Point') {
+                  const [eventLng, eventLat] = event.geography.coordinates as [number, number];
+                  const distance = calculateDistance(lat, lng, eventLat, eventLng);
+                  return distance <= radiusKm;
+                }
+                
+                // For LineString, check if any point is within radius
+                if (event.geography.type === 'LineString') {
+                  const coordinates = event.geography.coordinates as number[][];
+                  return coordinates.some(coord => {
+                    const [eventLng, eventLat] = coord;
+                    const distance = calculateDistance(lat, lng, eventLat, eventLng);
+                    return distance <= radiusKm;
+                  });
+                }
+                
+                return false;
               });
-              get().enhanceEvents();
-              get().updateStatistics();
-            } catch (error) {
-              console.error('Failed to import events:', error);
-              set({ error: error as Error });
+          },
+
+          // ===== Utilities =====
+          exportState: () => {
+            const state = get();
+            return {
+              events: Array.from(state.events.entries()),
+              metadata: {
+                exportedAt: new Date().toISOString(),
+                syncId: state.syncId,
+                version: '2.0.0',
+                eventCount: state.events.size
+              }
+            };
+          },
+
+          importState: (importedState) => set((state) => {
+            state.events = new Map(importedState.events);
+            state.eventOrder = importedState.events.map(([id]) => id);
+            state.syncId = importedState.metadata.syncId;
+            state.lastUpdated = new Date(importedState.metadata.exportedAt);
+            
+            // Rebuild versions
+            for (const [id, event] of state.events) {
+              state.eventVersions.set(id, {
+                id,
+                version: calculateEventHash(event),
+                updated: event.updated,
+                hash: calculateEventHash(event),
+                source: 'remote'
+              });
             }
-          }
+            
+            get().updateStatistics();
+            get().calculateDataQuality();
+          }),
+
+          validateIntegrity: () => {
+            const state = get();
+            const issues: string[] = [];
+            const orphanedEvents: string[] = [];
+            const missingVersions: string[] = [];
+            const inconsistentData: Array<{ eventId: string; issue: string }> = [];
+            
+            // Check for orphaned events in order array
+            for (const id of state.eventOrder) {
+              if (!state.events.has(id)) {
+                orphanedEvents.push(id);
+              }
+            }
+            
+            // Check for missing versions
+            for (const [id] of state.events) {
+              if (!state.eventVersions.has(id)) {
+                missingVersions.push(id);
+              }
+            }
+            
+            // Check for data inconsistencies
+            for (const [id, event] of state.events) {
+              if (!event.id) {
+                inconsistentData.push({ eventId: id, issue: 'Missing ID field' });
+              }
+              if (event.id !== id) {
+                inconsistentData.push({ 
+                  eventId: id, 
+                  issue: `ID mismatch: ${event.id} !== ${id}` 
+                });
+              }
+            }
+            
+            const valid = orphanedEvents.length === 0 && 
+                         missingVersions.length === 0 && 
+                         inconsistentData.length === 0;
+            
+            return {
+              valid,
+              issues,
+              orphanedEvents,
+              missingVersions,
+              inconsistentData
+            };
+          },
+
+          optimizeStorage: () => set((state) => {
+            // Remove orphaned references
+            const validIds = new Set(state.events.keys());
+            
+            state.eventOrder = state.eventOrder.filter(id => validIds.has(id));
+            
+            for (const id of state.eventVersions.keys()) {
+              if (!validIds.has(id)) {
+                state.eventVersions.delete(id);
+              }
+            }
+            
+            for (const id of state.pendingChanges.keys()) {
+              if (!validIds.has(id)) {
+                state.pendingChanges.delete(id);
+              }
+            }
+            
+            for (const id of state.conflicts.keys()) {
+              if (!validIds.has(id)) {
+                state.conflicts.delete(id);
+              }
+            }
+            
+            // Clear invalid selections
+            if (state.selectedEventId && !validIds.has(state.selectedEventId)) {
+              state.selectedEventId = null;
+            }
+            
+            // Clean up sets
+            for (const id of state.highlightedEventIds) {
+              if (!validIds.has(id)) {
+                state.highlightedEventIds.delete(id);
+              }
+            }
+            
+            for (const id of state.favoriteEventIds) {
+              if (!validIds.has(id)) {
+                state.favoriteEventIds.delete(id);
+              }
+            }
+            
+            for (const id of state.hiddenEventIds) {
+              if (!validIds.has(id)) {
+                state.hiddenEventIds.delete(id);
+              }
+            }
+            
+            for (const id of state.expandedEventIds) {
+              if (!validIds.has(id)) {
+                state.expandedEventIds.delete(id);
+              }
+            }
+          })
         }))
       ),
       {
@@ -747,35 +1177,57 @@ export const useEventStore = create<EventStoreState & EventStoreActions>()(
         partialize: (state) => ({
           favoriteEventIds: Array.from(state.favoriteEventIds),
           hiddenEventIds: Array.from(state.hiddenEventIds),
-          acknowledgedEventIds: Array.from(state.acknowledgedEventIds),
-          notificationConfig: state.notificationConfig
+          viewMode: state.viewMode,
+          groupBy: state.groupBy,
+          sortBy: state.sortBy,
+          sortDirection: state.sortDirection,
+          syncId: state.syncId,
+          lastSyncTimestamp: state.lastSyncTimestamp
         }),
-        onRehydrateStorage: () => (state) => {
-          if (state) {
-            // Convert arrays back to Sets after rehydration
-            state.favoriteEventIds = new Set(state.favoriteEventIds as any);
-            state.hiddenEventIds = new Set(state.hiddenEventIds as any);
-            state.acknowledgedEventIds = new Set(state.acknowledgedEventIds as any);
-            state.highlightedEventIds = new Set();
-          }
-        }
+        merge: (persistedState, currentState) => ({
+          ...currentState,
+          favoriteEventIds: new Set(persistedState?.favoriteEventIds || []),
+          hiddenEventIds: new Set(persistedState?.hiddenEventIds || []),
+          viewMode: persistedState?.viewMode || currentState.viewMode,
+          groupBy: persistedState?.groupBy || currentState.groupBy,
+          sortBy: persistedState?.sortBy || currentState.sortBy,
+          sortDirection: persistedState?.sortDirection || currentState.sortDirection,
+          syncId: persistedState?.syncId || currentState.syncId,
+          lastSyncTimestamp: persistedState?.lastSyncTimestamp || currentState.lastSyncTimestamp
+        })
       }
-    ),
-    {
-      name: 'EventStore'
-    }
+    )
   )
 );
 
-// Selector hooks for optimized re-renders
-export const useEvents = () => useEventStore(state => state.events);
-export const useSelectedEvent = () => useEventStore(state => state.selectedEvent);
-export const useFavoriteEvents = () => useEventStore(state => 
-  state.events.filter(e => state.favoriteEventIds.has(e.id))
-);
-export const useEventStatistics = () => useEventStore(state => state.statistics);
-export const useIsLoadingEvents = () => useEventStore(state => state.isLoading);
-export const useEventError = () => useEventStore(state => state.error);
-export const usePendingNotifications = () => useEventStore(state =>
-  state.events.filter(e => state.pendingNotifications.includes(e.id))
-);
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+function deepMerge(target: any, source: any): any {
+  const output = { ...target };
+  
+  if (isObject(target) && isObject(source)) {
+    Object.keys(source).forEach(key => {
+      if (isObject(source[key])) {
+        if (!(key in target)) {
+          output[key] = source[key];
+        } else {
+          output[key] = deepMerge(target[key], source[key]);
+        }
+      } else {
+        output[key] = source[key];
+      }
+    });
+  }
+  
+  return output;
+}
+
+function isObject(item: any): boolean {
+  return item && typeof item === 'object' && !Array.isArray(item);
+}
+
+// Export type and store
+export type { TrafficEvent };
+export default useEventStore;
