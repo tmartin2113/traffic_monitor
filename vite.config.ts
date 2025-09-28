@@ -1,55 +1,73 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
-import { comlink } from 'vite-plugin-comlink';
+import legacy from '@vitejs/plugin-legacy';
 
 export default defineConfig({
   plugins: [
     react(),
-    comlink(),
+    
+    // Add legacy browser support
+    legacy({
+      targets: ['defaults', 'not IE 11'],
+      additionalLegacyPolyfills: ['regenerator-runtime/runtime'],
+      renderLegacyChunks: true,
+      polyfills: {
+        'es.promise': true,
+        'es.array.iterator': true,
+        'es.object.assign': true,
+        'es.object.keys': true,
+        'es.array.find': true,
+        'es.array.includes': true
+      }
+    }),
+    
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'apple-touch-icon.png', 'mask-icon.svg'],
-      manifest: {
-        name: '511 Bay Area Traffic Monitor',
-        short_name: '511 Traffic',
-        description: 'Real-time traffic monitoring with differential updates',
-        theme_color: '#ffffff',
-        icons: [
-          {
-            src: 'pwa-192x192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: 'pwa-512x512.png',
-            sizes: '512x512',
-            type: 'image/png'
-          }
-        ]
-      },
       workbox: {
-        sourcemap: true,
+        globPatterns: ['**/*.{js,css,html,ico,png,svg}'],
         runtimeCaching: [
           {
             urlPattern: /^https:\/\/api\.511\.org\/.*/i,
             handler: 'NetworkFirst',
             options: {
               cacheName: 'api-cache',
-              expiration: {
-                maxEntries: 100,
-                maxAgeSeconds: 60 * 60
-              }
+              networkTimeoutSeconds: 10
             }
           }
         ]
-      }
+      },
+      // Disable PWA on browsers without service worker support
+      disable: !('serviceWorker' in navigator)
     })
   ],
-  worker: {
-    plugins: [comlink()]
+  
+  build: {
+    // Ensure compatibility with older browsers
+    target: ['es2015', 'edge88', 'firefox78', 'chrome87', 'safari13.1'],
+    
+    // Polyfill dynamic imports
+    polyfillModulePreload: true,
+    
+    // Create source maps for debugging
+    sourcemap: true,
+    
+    // Optimize chunks
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'react-vendor': ['react', 'react-dom'],
+          'map-vendor': ['leaflet', 'react-leaflet'],
+          'data-vendor': ['dexie', 'zustand']
+        }
+      }
+    }
   },
-  optimizeDeps: {
-    exclude: ['comlink']
+  
+  // Server configuration for deployment
+  server: {
+    host: true,
+    port: 3000,
+    cors: true
   }
 });
