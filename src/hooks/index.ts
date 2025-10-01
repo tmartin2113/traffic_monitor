@@ -1,64 +1,145 @@
 /**
- * FilterPanel Component Exports
+ * Custom Hooks Barrel Export
+ * Central export point for all custom React hooks
  * 
- * @module components/FilterPanel
- * @description Centralized export point for all FilterPanel components.
- * Provides filtering, API key management, and rate limiting UI components.
+ * @module hooks
+ * @description Provides reusable React hooks for the 511 Traffic Monitor application.
+ * Includes hooks for API integration, state management, geolocation, and UI controls.
  * 
  * @author Senior Development Team
  * @since 1.0.0
  * @license MIT
  */
 
-// Component Exports
-export { default as FilterPanel } from './FilterPanel';
-export { default as ApiKeyInput } from './ApiKeyInput';
-export { default as RateLimitIndicator } from './RateLimitIndicator';
+// ============================================
+// Traffic Data Hooks
+// ============================================
 
-// Type Exports
-export type { FilterPanelProps } from './FilterPanel';
-export type { ApiKeyInputProps } from './ApiKeyInput';
-export type { RateLimitIndicatorProps } from './RateLimitIndicator';
+export { 
+  useTrafficEvents,
+  type UseTrafficEventsOptions,
+  type UseTrafficEventsResult 
+} from './useTrafficEvents';
 
-// Named Exports for Convenience
-import FilterPanel from './FilterPanel';
-import ApiKeyInput from './ApiKeyInput';
-import RateLimitIndicator from './RateLimitIndicator';
+// ============================================
+// API Management Hooks
+// ============================================
+
+export { 
+  useApiKeyManager,
+  type UseApiKeyManagerResult 
+} from './useApiKeyManager';
+
+// ============================================
+// Storage Hooks
+// ============================================
+
+export { 
+  useLocalStorage,
+  type UseLocalStorageOptions 
+} from './useLocalStorage';
+
+// ============================================
+// Geolocation Hooks
+// ============================================
+
+export { 
+  useGeofencing,
+  type UseGeofencingOptions,
+  type UseGeofencingResult 
+} from './useGeofencing';
+
+// ============================================
+// Map Control Hooks
+// ============================================
+
+export { 
+  useMapControls,
+  type UseMapControlsOptions,
+  type UseMapControlsResult 
+} from './useMapControls';
+
+// ============================================
+// Utility Hooks (if they exist)
+// ============================================
+
+// Export these if the files exist in your hooks directory
+// export { useDebounce } from './useDebounce';
+// export { useThrottle } from './useThrottle';
+// export { useMediaQuery } from './useMediaQuery';
+// export { usePrevious } from './usePrevious';
+// export { useOnClickOutside } from './useOnClickOutside';
+// export { useIntersectionObserver } from './useIntersectionObserver';
+// export { useWindowSize } from './useWindowSize';
+
+// ============================================
+// Hook Utilities
+// ============================================
 
 /**
- * FilterPanel namespace containing all filter-related components
- * @namespace FilterPanel
+ * Hook configuration constants
  */
-export const Filter = {
-  Panel: FilterPanel,
-  ApiKey: ApiKeyInput,
-  RateLimit: RateLimitIndicator,
+export const HOOK_CONFIG = {
+  DEFAULT_POLLING_INTERVAL: 60000,
+  DEFAULT_CACHE_TIME: 30000,
+  DEFAULT_STALE_TIME: 5000,
+  MAX_RETRY_ATTEMPTS: 3,
+  RETRY_DELAY: 1000,
 } as const;
 
 /**
- * Composite component that combines all filter functionality
- * @returns Combined filter panel with all sub-components
+ * Hook status types
  */
-export const FilterControls = {
-  Main: FilterPanel,
-  ApiKeyInput,
-  RateLimitIndicator,
-} as const;
+export type HookStatus = 'idle' | 'loading' | 'success' | 'error';
 
-// Re-export utility types for filter handling
-export interface FilterPanelComponents {
-  FilterPanel: typeof FilterPanel;
-  ApiKeyInput: typeof ApiKeyInput;
-  RateLimitIndicator: typeof RateLimitIndicator;
+/**
+ * Common hook error type
+ */
+export interface HookError {
+  message: string;
+  code?: string;
+  statusCode?: number;
+  timestamp: Date;
 }
 
-// Configuration constants
-export const FILTER_PANEL_CONFIG = {
-  DEFAULT_EXPANDED: true,
-  MAX_HEIGHT: '100vh',
-  MIN_WIDTH: '320px',
-  ANIMATION_DURATION: 300,
-} as const;
+/**
+ * Common hook options interface
+ */
+export interface BaseHookOptions {
+  enabled?: boolean;
+  refetchInterval?: number;
+  refetchOnWindowFocus?: boolean;
+  refetchOnReconnect?: boolean;
+  retry?: boolean | number;
+  retryDelay?: number;
+  onSuccess?: (data: any) => void;
+  onError?: (error: HookError) => void;
+}
 
-// Version information
-export const FILTER_PANEL_VERSION = '1.0.0' as const;
+// ============================================
+// Version Information
+// ============================================
+
+export const HOOKS_VERSION = '1.0.0' as const;
+
+// ============================================
+// Re-export common React hooks with type safety
+// ============================================
+
+export {
+  useCallback,
+  useContext,
+  useDebugValue,
+  useDeferredValue,
+  useEffect,
+  useId,
+  useImperativeHandle,
+  useInsertionEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+} from 'react';
