@@ -1,48 +1,129 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!-- ================================================================ -->
+    <!-- Basic Meta Tags -->
+    <!-- ================================================================ -->
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Real-time traffic monitoring for the San Francisco Bay Area. Track road closures, incidents, and construction using live 511.org data." />
-    <meta name="keywords" content="traffic, bay area, 511, road conditions, traffic incidents, road closures, San Francisco, Oakland, San Jose" />
-    <meta name="author" content="511 Traffic Monitor" />
-    <meta property="og:title" content="511 Bay Area Traffic Monitor" />
-    <meta property="og:description" content="Real-time traffic monitoring for the San Francisco Bay Area" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    
+    <!-- ================================================================ -->
+    <!-- SEO Meta Tags -->
+    <!-- ================================================================ -->
+    <meta name="description" content="Real-time traffic monitoring for the San Francisco Bay Area. Track road closures, incidents, construction, and traffic conditions using live 511.org data." />
+    <meta name="keywords" content="traffic, bay area, 511, road conditions, traffic incidents, road closures, San Francisco, Oakland, San Jose, California, real-time traffic, traffic monitor" />
+    <meta name="author" content="511 Traffic Monitor Team" />
+    <meta name="robots" content="index, follow" />
+    <meta name="language" content="English" />
+    <meta name="revisit-after" content="7 days" />
+    
+    <!-- ================================================================ -->
+    <!-- Open Graph / Facebook Meta Tags -->
+    <!-- ================================================================ -->
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://511-traffic-monitor.vercel.app" />
+    <meta property="og:title" content="511 Bay Area Traffic Monitor - Real-Time Traffic Updates" />
+    <meta property="og:description" content="Monitor real-time traffic conditions, road closures, and incidents across the San Francisco Bay Area" />
     <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:site_name" content="511 Bay Area Traffic Monitor" />
+    
+    <!-- ================================================================ -->
+    <!-- Twitter Meta Tags -->
+    <!-- ================================================================ -->
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://511-traffic-monitor.vercel.app" />
     <meta name="twitter:title" content="511 Bay Area Traffic Monitor" />
     <meta name="twitter:description" content="Real-time traffic monitoring for the San Francisco Bay Area" />
     <meta name="twitter:image" content="/twitter-card.png" />
+    <meta name="twitter:creator" content="@511SFBay" />
     
-    <!-- Preconnect to external domains for better performance -->
-    <link rel="preconnect" href="https://api.511.org">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- ================================================================ -->
+    <!-- Favicons & App Icons -->
+    <!-- ================================================================ -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#3b82f6" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="511 Traffic" />
     
+    <!-- ================================================================ -->
+    <!-- Performance Optimization -->
+    <!-- ================================================================ -->
+    <!-- Preconnect to external domains for faster resource loading -->
+    <link rel="preconnect" href="https://api.511.org" crossorigin />
+    <link rel="preconnect" href="https://unpkg.com" crossorigin />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://tile.openstreetmap.org" />
+    
+    <!-- ================================================================ -->
+    <!-- External Stylesheets -->
+    <!-- ================================================================ -->
     <!-- Leaflet CSS - Required for maps -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    <link 
+      rel="stylesheet" 
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-      crossorigin="" />
+      crossorigin="anonymous" 
+    />
     
     <!-- Leaflet MarkerCluster CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+    <link 
+      rel="stylesheet" 
+      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css"
+      crossorigin="anonymous"
+    />
+    <link 
+      rel="stylesheet" 
+      href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css"
+      crossorigin="anonymous"
+    />
     
-    <!-- Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <!-- Google Fonts - Inter -->
+    <link 
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@100;200;300;400;500;600;700;800;900&display=swap" 
+      rel="stylesheet"
+    />
     
+    <!-- ================================================================ -->
+    <!-- Page Title -->
+    <!-- ================================================================ -->
     <title>511 Bay Area Traffic Monitor - Real-Time Traffic Updates</title>
     
-    <!-- Critical CSS for faster initial paint -->
+    <!-- ================================================================ -->
+    <!-- Critical CSS for Faster Initial Paint -->
+    <!-- ================================================================ -->
     <style>
+      /* Critical CSS loaded inline for faster First Contentful Paint */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      
+      html {
+        -webkit-text-size-adjust: 100%;
+        -webkit-tap-highlight-color: transparent;
+      }
+      
       body {
         margin: 0;
-        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 
+                     'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+        font-feature-settings: "rlig" 1, "calt" 1;
+        line-height: 1.5;
+        color: #1f2937;
+        background-color: #f9fafb;
       }
       
       #root {
@@ -51,74 +132,217 @@
         flex-direction: column;
       }
       
-      /* Loading state styles */
+      /* ============================================================ */
+      /* Loading State Styles */
+      /* ============================================================ */
       .app-loading {
+        position: fixed;
+        inset: 0;
         display: flex;
         align-items: center;
         justify-content: center;
         min-height: 100vh;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        z-index: 9999;
+        transition: opacity 0.3s ease-out, transform 0.3s ease-out;
+      }
+      
+      .app-loading.fade-out {
+        opacity: 0;
+        transform: scale(0.95);
+      }
+      
+      .loading-content {
+        text-align: center;
+        color: white;
       }
       
       .loading-spinner {
-        width: 48px;
-        height: 48px;
-        border: 4px solid rgba(255, 255, 255, 0.3);
+        width: 56px;
+        height: 56px;
+        border: 5px solid rgba(255, 255, 255, 0.2);
         border-top-color: white;
         border-radius: 50%;
         animation: spin 1s linear infinite;
+        margin: 0 auto 24px;
       }
       
       @keyframes spin {
         to { transform: rotate(360deg); }
       }
       
-      /* Prevent FOUC (Flash of Unstyled Content) */
+      .loading-title {
+        font-size: 24px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        letter-spacing: -0.025em;
+      }
+      
+      .loading-subtitle {
+        font-size: 16px;
+        opacity: 0.9;
+        font-weight: 400;
+      }
+      
+      /* ============================================================ */
+      /* Prevent Flash of Unstyled Content (FOUC) */
+      /* ============================================================ */
       .hidden {
         display: none !important;
       }
+      
+      /* ============================================================ */
+      /* No-Script Fallback Styles */
+      /* ============================================================ */
+      .noscript-warning {
+        padding: 40px 20px;
+        text-align: center;
+        font-family: system-ui, sans-serif;
+        background: #fef2f2;
+        border: 2px solid #fecaca;
+        border-radius: 8px;
+        margin: 20px;
+      }
+      
+      .noscript-warning h1 {
+        color: #991b1b;
+        font-size: 24px;
+        margin-bottom: 16px;
+      }
+      
+      .noscript-warning p {
+        color: #7f1d1d;
+        font-size: 16px;
+        line-height: 1.6;
+        margin-bottom: 12px;
+      }
     </style>
     
-    <!-- Prevent blocking render -->
+    <!-- ================================================================ -->
+    <!-- Dark Mode Detection (Before Page Load) -->
+    <!-- ================================================================ -->
     <script>
-      // Check for user's color scheme preference
-      if (localStorage.theme === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-        document.documentElement.classList.add('dark');
-      } else {
-        document.documentElement.classList.remove('dark');
-      }
+      // Prevent FOUC by applying theme before page renders
+      (function() {
+        const theme = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        
+        if (theme === 'dark' || (!theme && prefersDark)) {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+      })();
     </script>
   </head>
+  
   <body>
-    <!-- No-script fallback -->
+    <!-- ================================================================ -->
+    <!-- No-Script Fallback -->
+    <!-- ================================================================ -->
     <noscript>
-      <div style="padding: 20px; text-align: center; font-family: system-ui, sans-serif;">
-        <h1>JavaScript Required</h1>
-        <p>Please enable JavaScript to use the 511 Bay Area Traffic Monitor.</p>
-        <p>This application requires JavaScript to display real-time traffic data and interactive maps.</p>
+      <div class="noscript-warning">
+        <h1>⚠️ JavaScript Required</h1>
+        <p>
+          <strong>This application requires JavaScript to function.</strong>
+        </p>
+        <p>
+          The 511 Bay Area Traffic Monitor uses modern web technologies 
+          to display real-time traffic data and interactive maps.
+        </p>
+        <p>
+          Please enable JavaScript in your browser settings and reload 
+          this page to use the application.
+        </p>
+        <p style="margin-top: 24px; font-size: 14px; color: #991b1b;">
+          <strong>How to enable JavaScript:</strong><br>
+          • <strong>Chrome:</strong> Settings → Privacy and security → Site settings → JavaScript<br>
+          • <strong>Firefox:</strong> Type "about:config" → search "javascript.enabled"<br>
+          • <strong>Safari:</strong> Preferences → Security → Enable JavaScript<br>
+          • <strong>Edge:</strong> Settings → Site permissions → JavaScript
+        </p>
       </div>
     </noscript>
     
-    <!-- Application root -->
+    <!-- ================================================================ -->
+    <!-- Application Root Container -->
+    <!-- ================================================================ -->
     <div id="root">
-      <!-- Initial loading state -->
+      <!-- Initial Loading State (Replaced by React after mount) -->
       <div class="app-loading">
-        <div class="loading-spinner"></div>
+        <div class="loading-content">
+          <div class="loading-spinner"></div>
+          <h1 class="loading-title">🚦 Loading Traffic Monitor</h1>
+          <p class="loading-subtitle">Initializing real-time data...</p>
+        </div>
       </div>
     </div>
     
-    <!-- Module entry point -->
+    <!-- ================================================================ -->
+    <!-- Application Entry Point (Vite Module) -->
+    <!-- ================================================================ -->
     <script type="module" src="/src/main.tsx"></script>
     
-    <!-- Error tracking (optional) -->
+    <!-- ================================================================ -->
+    <!-- Global Error Handlers -->
+    <!-- ================================================================ -->
     <script>
+      // Catch and log global errors
       window.addEventListener('error', function(event) {
-        console.error('Global error:', event.error);
+        console.error('Global JavaScript error:', event.error);
+        
+        // Send to error tracking service if configured
+        if (window.Sentry) {
+          window.Sentry.captureException(event.error);
+        }
       });
       
+      // Catch unhandled promise rejections
       window.addEventListener('unhandledrejection', function(event) {
         console.error('Unhandled promise rejection:', event.reason);
+        
+        // Send to error tracking service if configured
+        if (window.Sentry) {
+          window.Sentry.captureException(event.reason);
+        }
+      });
+      
+      // Log page visibility changes (useful for debugging)
+      document.addEventListener('visibilitychange', function() {
+        console.log('Page visibility:', document.hidden ? 'hidden' : 'visible');
       });
     </script>
+    
+    <!-- ================================================================ -->
+    <!-- Service Worker Registration (PWA Support) -->
+    <!-- ================================================================ -->
+    <script>
+      // Register service worker for offline support (if enabled)
+      if ('serviceWorker' in navigator && import.meta.env.PROD) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker
+            .register('/sw.js')
+            .then(function(registration) {
+              console.log('✅ Service Worker registered:', registration.scope);
+            })
+            .catch(function(error) {
+              console.warn('⚠️ Service Worker registration failed:', error);
+            });
+        });
+      }
+    </script>
+    
+    <!-- ================================================================ -->
+    <!-- Analytics (Optional - Uncomment if using) -->
+    <!-- ================================================================ -->
+    <!--
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+    <script>
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-XXXXXXXXXX');
+    </script>
+    -->
   </body>
 </html>
