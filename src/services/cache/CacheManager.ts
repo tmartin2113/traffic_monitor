@@ -1,291 +1,165 @@
 /**
- * Cache Manager Service with Differential Support
- * Implements multi-tier caching with TTL, compression, and differential updates
- * 
- * @module services/cache/CacheManager
+ * @file services/cache/CacheManager.ts
+ * @description Production-ready cache manager with memory and storage management
  * @version 2.0.0
+ * 
+ * Features:
+ * - Memory and localStorage caching
+ * - LRU eviction policy
+ * - TTL-based expiration
+ * - Quota management with retry limits
+ * - Differential caching support
+ * - Statistics tracking
+ * - Automatic cleanup
  */
 
-import { CACHE_CONFIG } from '@utils/constants';
 import { TrafficEvent } from '@types/api.types';
 
 // ============================================================================
-// Type Definitions
+// TYPE DEFINITIONS
 // ============================================================================
 
-interface CacheEntry<T> {
-  value: T;
+/**
+ * Cache entry with metadata
+ */
+export interface CacheEntry<T = any> {
+  key: string;
+  data: T;
   timestamp: number;
   ttl: number;
-  hits: number;
   size: number;
-  compressed: boolean;
-  etag?: string;
-  version?: string;
+  hits: number;
+  lastAccessed: number;
+}
+
+/**
+ * Differential cache entry for incremental updates
+ */
+export interface DifferentialEntry<T = any> {
+  baseVersion: string;
+  delta: Partial<T>;
+  timestamp: number;
+  size: number;
   checksum?: string;
 }
 
-interface DifferentialEntry<T> {
-  baseKey: string;
-  differential: Differential<T>;
-  timestamp: number;
-  size: number;
+/**
+ * Cache policy configuration
+ */
+export interface CachePolicy {
+  maxMemorySize: number;
+  maxStorageSize: number;
+  defaultTTL: number;
+  cleanupInterval: number;
+  persistToStorage: boolean;
+  evictionPolicy: 'lru' | 'lfu' | 'fifo';
 }
 
-export interface Differential<T> {
-  added: T[];
-  updated: T[];
-  deleted: string[];
-  timestamp: string;
-  metadata?: {
-    baseVersion: string;
-    targetVersion: string;
-    compressed: boolean;
-    size: number;
-  };
-}
-
+/**
+ * Cache statistics
+ */
 export interface CacheStats {
-  // Basic stats
-  size: number;
+  memoryEntries: number;
+  memorySize: number;
+  storageEntries: number;
+  storageSize: number;
   hits: number;
   misses: number;
   hitRate: number;
-  
-  // Memory stats
-  memoryUsage: number;
-  maxMemory: number;
-  compressionRatio: number;
-  
-  // Timing stats
+  evictions: number;
   oldestEntry: number | null;
   newestEntry: number | null;
   averageTTL: number;
-  
-  // Differential stats
   differentialCount: number;
   differentialMemory: number;
   differentialHitRate: number;
 }
 
-interface CachePolicy {
-  maxSize: number;
-  maxMemory: number;
-  defaultTTL: number;
-  evictionPolicy: 'lru' | 'lfu' | 'fifo' | 'ttl';
-  compressionThreshold: number;
-  enableDifferential: boolean;
-  persistToStorage: boolean;
-}
-
-interface EvictionCandidate {
-  key: string;
-  score: number;
-  size: number;
-  age: number;
+/**
+ * Storage operation result
+ */
+interface StorageOperationResult {
+  success: boolean;
+  error?: string;
+  retriesUsed?: number;
 }
 
 // ============================================================================
-// Compression Utilities
+// CONSTANTS
 // ============================================================================
 
-class CompressionUtil {
-  private textEncoder = new TextEncoder();
-  private textDecoder = new TextDecoder();
+const DEFAULT_POLICY: CachePolicy = {
+  maxMemorySize: 50 * 1024 * 1024, // 50MB
+  maxStorageSize: 10 * 1024 * 1024, // 10MB
+  defaultTTL: 5 * 60 * 1000, // 5 minutes
+  cleanupInterval: 60 * 1000, // 1 minute
+  persistToStorage: true,
+  evictionPolicy: 'lru',
+};
 
-  /**
-   * Compress data using built-in compression
-   */
-  async compress(data: string): Promise<Uint8Array> {
-    const input = this.textEncoder.encode(data);
-    
-    // Use CompressionStream API if available (modern browsers)
-    if ('CompressionStream' in globalThis) {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(input);
-          controller.close();
-        }
-      });
-      
-      const compressedStream = stream.pipeThrough(
-        new (globalThis as any).CompressionStream('gzip')
-      );
-      
-      const chunks: Uint8Array[] = [];
-      const reader = compressedStream.getReader();
-      
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-      }
-      
-      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-      const result = new Uint8Array(totalLength);
-      let offset = 0;
-      
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-      }
-      
-      return result;
-    }
-    
-    // Fallback: Simple RLE compression for older environments
-    return this.simpleCompress(input);
-  }
-
-  /**
-   * Decompress data
-   */
-  async decompress(compressed: Uint8Array): Promise<string> {
-    if ('DecompressionStream' in globalThis) {
-      const stream = new ReadableStream({
-        start(controller) {
-          controller.enqueue(compressed);
-          controller.close();
-        }
-      });
-      
-      const decompressedStream = stream.pipeThrough(
-        new (globalThis as any).DecompressionStream('gzip')
-      );
-      
-      const chunks: Uint8Array[] = [];
-      const reader = decompressedStream.getReader();
-      
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-      }
-      
-      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-      const result = new Uint8Array(totalLength);
-      let offset = 0;
-      
-      for (const chunk of chunks) {
-        result.set(chunk, offset);
-        offset += chunk.length;
-      }
-      
-      return this.textDecoder.decode(result);
-    }
-    
-    // Fallback decompression
-    return this.textDecoder.decode(this.simpleDecompress(compressed));
-  }
-
-  /**
-   * Simple compression fallback
-   */
-  private simpleCompress(input: Uint8Array): Uint8Array {
-    const output: number[] = [];
-    let i = 0;
-    
-    while (i < input.length) {
-      let runLength = 1;
-      const currentByte = input[i];
-      
-      while (i + runLength < input.length && 
-             input[i + runLength] === currentByte && 
-             runLength < 255) {
-        runLength++;
-      }
-      
-      if (runLength > 3) {
-        output.push(0xFF, runLength, currentByte);
-        i += runLength;
-      } else {
-        output.push(currentByte);
-        i++;
-      }
-    }
-    
-    return new Uint8Array(output);
-  }
-
-  /**
-   * Simple decompression fallback
-   */
-  private simpleDecompress(compressed: Uint8Array): Uint8Array {
-    const output: number[] = [];
-    let i = 0;
-    
-    while (i < compressed.length) {
-      if (compressed[i] === 0xFF && i + 2 < compressed.length) {
-        const runLength = compressed[i + 1];
-        const byte = compressed[i + 2];
-        
-        for (let j = 0; j < runLength; j++) {
-          output.push(byte);
-        }
-        i += 3;
-      } else {
-        output.push(compressed[i]);
-        i++;
-      }
-    }
-    
-    return new Uint8Array(output);
-  }
-}
+const MAX_STORAGE_RETRIES = 3;
+const STORAGE_RETRY_DELAY = 100; // milliseconds
+const STORAGE_QUOTA_THRESHOLD = 0.9; // 90% of quota
 
 // ============================================================================
-// Main Cache Manager Class
+// CACHE MANAGER CLASS
 // ============================================================================
 
 export class CacheManager {
-  private memoryCache: Map<string, CacheEntry<any>>;
-  private differentialCache: Map<string, DifferentialEntry<any>>;
-  private compressionUtil: CompressionUtil;
+  private static instance: CacheManager | null = null;
+
+  // Cache storage
+  private memoryCache: Map<string, CacheEntry>;
+  private differentialCache: Map<string, DifferentialEntry>;
+  
+  // Policy and configuration
   private policy: CachePolicy;
+  
+  // Memory tracking
+  private currentMemoryUsage: number;
+  private storageQuota: number;
+  
+  // Statistics
   private stats: {
     hits: number;
     misses: number;
+    evictions: number;
     differentialHits: number;
     differentialMisses: number;
   };
-  private currentMemoryUsage: number = 0;
-  private accessOrder: Map<string, number>;
-  private static instance: CacheManager | null = null;
-  private cleanupInterval: NodeJS.Timeout | null = null;
-  private storageQuota: number = 50 * 1024 * 1024; // 50MB default
+  
+  // Cleanup
+  private cleanupInterval: NodeJS.Timeout | null;
+  
+  // Retry tracking
+  private retryAttempts: Map<string, number>;
 
-  constructor(policy?: Partial<CachePolicy>) {
-    this.policy = {
-      maxSize: CACHE_CONFIG.MAX_CACHE_SIZE || 1000,
-      maxMemory: CACHE_CONFIG.MAX_MEMORY_MB ? CACHE_CONFIG.MAX_MEMORY_MB * 1024 * 1024 : 100 * 1024 * 1024,
-      defaultTTL: CACHE_CONFIG.DEFAULT_TTL_MS || 30000,
-      evictionPolicy: 'lru',
-      compressionThreshold: 1024, // Compress entries larger than 1KB
-      enableDifferential: true,
-      persistToStorage: true,
-      ...policy
-    };
-
+  /**
+   * Private constructor for singleton pattern
+   */
+  private constructor(policy: Partial<CachePolicy> = {}) {
     this.memoryCache = new Map();
     this.differentialCache = new Map();
-    this.compressionUtil = new CompressionUtil();
-    this.accessOrder = new Map();
-    
+    this.policy = { ...DEFAULT_POLICY, ...policy };
+    this.currentMemoryUsage = 0;
+    this.storageQuota = this.policy.maxStorageSize;
     this.stats = {
       hits: 0,
       misses: 0,
+      evictions: 0,
       differentialHits: 0,
-      differentialMisses: 0
+      differentialMisses: 0,
     };
+    this.cleanupInterval = null;
+    this.retryAttempts = new Map();
 
-    this.initializeStorage();
-    this.startCleanupInterval();
+    this.initialize();
   }
 
   /**
    * Get singleton instance
    */
-  static getInstance(policy?: Partial<CachePolicy>): CacheManager {
+  public static getInstance(policy?: Partial<CachePolicy>): CacheManager {
     if (!CacheManager.instance) {
       CacheManager.instance = new CacheManager(policy);
     }
@@ -293,541 +167,101 @@ export class CacheManager {
   }
 
   /**
-   * Get cached value with differential support
+   * Reset singleton instance (for testing)
    */
-  async get<T>(key: string, options?: { 
-    allowDifferential?: boolean; 
-    baseKey?: string;
-  }): Promise<T | null> {
-    // Try memory cache first
-    const memoryEntry = this.memoryCache.get(key);
-    
-    if (memoryEntry) {
-      const now = Date.now();
-      const age = now - memoryEntry.timestamp;
-      
-      if (age <= memoryEntry.ttl) {
-        // Cache hit
-        memoryEntry.hits++;
-        this.stats.hits++;
-        this.updateAccessOrder(key);
-        
-        // Decompress if needed
-        if (memoryEntry.compressed) {
-          const decompressed = await this.compressionUtil.decompress(memoryEntry.value);
-          return JSON.parse(decompressed) as T;
-        }
-        
-        return memoryEntry.value as T;
-      } else {
-        // Expired - remove it
-        this.memoryCache.delete(key);
-        this.currentMemoryUsage -= memoryEntry.size;
-      }
-    }
-
-    // Try differential cache if enabled
-    if (options?.allowDifferential && options.baseKey) {
-      const differential = await this.getDifferentialValue<T>(options.baseKey, key);
-      if (differential) {
-        this.stats.differentialHits++;
-        return differential;
-      }
-      this.stats.differentialMisses++;
-    }
-
-    // Try localStorage
-    if (this.policy.persistToStorage) {
-      const storageEntry = await this.getFromStorage<T>(key);
-      if (storageEntry) {
-        // Restore to memory cache
-        this.memoryCache.set(key, storageEntry);
-        this.currentMemoryUsage += storageEntry.size;
-        this.stats.hits++;
-        
-        // Decompress if needed
-        if (storageEntry.compressed) {
-          const decompressed = await this.compressionUtil.decompress(storageEntry.value);
-          return JSON.parse(decompressed) as T;
-        }
-        
-        return storageEntry.value;
-      }
-    }
-
-    // Cache miss
-    this.stats.misses++;
-    return null;
-  }
-
-  /**
-   * Set cache value with optional compression
-   */
-  async set<T>(
-    key: string, 
-    value: T, 
-    ttl: number = this.policy.defaultTTL,
-    options?: {
-      etag?: string;
-      version?: string;
-      compress?: boolean;
-    }
-  ): Promise<void> {
-    // Calculate size
-    const serialized = JSON.stringify(value);
-    const size = new Blob([serialized]).size;
-    
-    // Enforce memory limit
-    if (this.currentMemoryUsage + size > this.policy.maxMemory) {
-      await this.evictEntries(size);
-    }
-
-    // Compress if needed
-    let storedValue: any = value;
-    let compressed = false;
-    
-    if ((options?.compress !== false) && size > this.policy.compressionThreshold) {
-      try {
-        const compressedData = await this.compressionUtil.compress(serialized);
-        if (compressedData.length < size) {
-          storedValue = compressedData;
-          compressed = true;
-        }
-      } catch (error) {
-        console.warn('Compression failed, storing uncompressed:', error);
-      }
-    }
-
-    const entry: CacheEntry<T> = {
-      value: storedValue,
-      timestamp: Date.now(),
-      ttl,
-      hits: 0,
-      size: compressed ? storedValue.length : size,
-      compressed,
-      etag: options?.etag,
-      version: options?.version,
-      checksum: this.generateChecksum(serialized)
-    };
-
-    // Store in memory
-    this.memoryCache.set(key, entry);
-    this.currentMemoryUsage += entry.size;
-    this.updateAccessOrder(key);
-
-    // Store in localStorage if enabled
-    if (this.policy.persistToStorage) {
-      await this.saveToStorage(key, entry);
-    }
-
-    // Enforce size limit
-    if (this.memoryCache.size > this.policy.maxSize) {
-      await this.evictEntries(0);
+  public static resetInstance(): void {
+    if (CacheManager.instance) {
+      CacheManager.instance.destroy();
+      CacheManager.instance = null;
     }
   }
 
-  /**
-   * Delete cache entry
-   */
-  async delete(key: string): Promise<boolean> {
-    const entry = this.memoryCache.get(key);
-    if (entry) {
-      this.currentMemoryUsage -= entry.size;
-      this.memoryCache.delete(key);
-      this.accessOrder.delete(key);
-      
-      if (this.policy.persistToStorage) {
-        await this.removeFromStorage(key);
-      }
-      
-      return true;
-    }
-    return false;
-  }
+  // ============================================================================
+  // INITIALIZATION
+  // ============================================================================
 
   /**
-   * Clear all cache
+   * Initialize cache manager
    */
-  async clear(): Promise<void> {
-    this.memoryCache.clear();
-    this.differentialCache.clear();
-    this.accessOrder.clear();
-    this.currentMemoryUsage = 0;
-    
-    this.stats = {
-      hits: 0,
-      misses: 0,
-      differentialHits: 0,
-      differentialMisses: 0
-    };
-    
-    if (this.policy.persistToStorage) {
-      await this.clearStorage();
-    }
-  }
-
-  /**
-   * Get or compute differential between two cache states
-   */
-  async getDifferential<T extends { id: string; version?: string }>(
-    oldKey: string,
-    newKey: string,
-    options?: { cache?: boolean }
-  ): Promise<Differential<T> | null> {
-    // Check differential cache
-    const diffKey = `diff:${oldKey}:${newKey}`;
-    const cached = this.differentialCache.get(diffKey);
-    
-    if (cached) {
-      this.stats.differentialHits++;
-      return cached.differential;
-    }
-
-    const oldData = await this.get<T[]>(oldKey);
-    const newData = await this.get<T[]>(newKey);
-    
-    if (!oldData || !newData) {
-      return null;
-    }
-
-    const differential = this.computeDifferential(oldData, newData);
-    
-    // Cache the differential if requested
-    if (options?.cache !== false) {
-      const size = new Blob([JSON.stringify(differential)]).size;
-      
-      this.differentialCache.set(diffKey, {
-        baseKey: oldKey,
-        differential,
-        timestamp: Date.now(),
-        size
-      });
-      
-      // Limit differential cache size
-      if (this.differentialCache.size > 50) {
-        this.pruneDifferentialCache();
-      }
-    }
-
-    return differential;
-  }
-
-  /**
-   * Compute differential between two datasets
-   */
-  private computeDifferential<T extends { id: string; version?: string }>(
-    oldData: T[],
-    newData: T[]
-  ): Differential<T> {
-    const oldMap = new Map(oldData.map(item => [item.id, item]));
-    const newMap = new Map(newData.map(item => [item.id, item]));
-    
-    const added: T[] = [];
-    const updated: T[] = [];
-    const deleted: string[] = [];
-    
-    // Find additions and updates
-    for (const [id, newItem] of newMap) {
-      const oldItem = oldMap.get(id);
-      
-      if (!oldItem) {
-        added.push(newItem);
-      } else if (this.hasChanged(oldItem, newItem)) {
-        updated.push(newItem);
-      }
-    }
-    
-    // Find deletions
-    for (const [id] of oldMap) {
-      if (!newMap.has(id)) {
-        deleted.push(id);
-      }
-    }
-    
-    return {
-      added,
-      updated,
-      deleted,
-      timestamp: new Date().toISOString(),
-      metadata: {
-        baseVersion: this.getDataVersion(oldData),
-        targetVersion: this.getDataVersion(newData),
-        compressed: false,
-        size: new Blob([JSON.stringify({ added, updated, deleted })]).size
-      }
-    };
-  }
-
-  /**
-   * Merge differential into cached dataset
-   */
-  async mergeDifferential<T extends { id: string }>(
-    baseKey: string,
-    differential: Differential<T>,
-    options?: { 
-      ttl?: number; 
-      createNewKey?: boolean;
-      validate?: (data: T[]) => boolean;
-    }
-  ): Promise<{ key: string; data: T[] }> {
-    const baseData = await this.get<T[]>(baseKey) || [];
-    const dataMap = new Map(baseData.map(item => [item.id, item]));
-    
-    // Apply deletions
-    for (const id of differential.deleted) {
-      dataMap.delete(id);
-    }
-    
-    // Apply additions and updates
-    for (const item of [...differential.added, ...differential.updated]) {
-      dataMap.set(item.id, item);
-    }
-    
-    const mergedData = Array.from(dataMap.values());
-    
-    // Validate if requested
-    if (options?.validate && !options.validate(mergedData)) {
-      throw new Error('Merged data validation failed');
-    }
-    
-    // Determine storage key
-    const targetKey = options?.createNewKey 
-      ? `${baseKey}:${Date.now()}`
-      : baseKey;
-    
-    // Store merged result
-    await this.set(targetKey, mergedData, options?.ttl);
-    
-    return { key: targetKey, data: mergedData };
-  }
-
-  /**
-   * Get differential value by applying differentials
-   */
-  private async getDifferentialValue<T extends { id: string }>(
-    baseKey: string,
-    targetKey: string
-  ): Promise<T[] | null> {
-    // Find path from base to target through differentials
-    const path = this.findDifferentialPath(baseKey, targetKey);
-    
-    if (!path || path.length === 0) {
-      return null;
-    }
-
-    // Get base data
-    let currentData = await this.get<T[]>(baseKey);
-    if (!currentData) {
-      return null;
-    }
-
-    // Apply differentials in sequence
-    for (const diffKey of path) {
-      const diffEntry = this.differentialCache.get(diffKey);
-      if (!diffEntry) {
-        return null;
-      }
-
-      const result = await this.mergeDifferential(
-        baseKey,
-        diffEntry.differential,
-        { createNewKey: false }
-      );
-      
-      currentData = result.data;
-    }
-
-    return currentData;
-  }
-
-  /**
-   * Find path through differential cache
-   */
-  private findDifferentialPath(baseKey: string, targetKey: string): string[] | null {
-    // Simple implementation - could be enhanced with graph traversal
-    const directKey = `diff:${baseKey}:${targetKey}`;
-    
-    if (this.differentialCache.has(directKey)) {
-      return [directKey];
-    }
-
-    // TODO: Implement multi-hop differential path finding
-    return null;
-  }
-
-  /**
-   * Check if data has changed
-   */
-  private hasChanged<T>(oldItem: T, newItem: T): boolean {
-    // Check version if available
-    if ('version' in oldItem && 'version' in newItem) {
-      return (oldItem as any).version !== (newItem as any).version;
-    }
-    
-    // Check updated timestamp if available
-    if ('updated' in oldItem && 'updated' in newItem) {
-      return (oldItem as any).updated !== (newItem as any).updated;
-    }
-    
-    // Deep comparison
-    return JSON.stringify(oldItem) !== JSON.stringify(newItem);
-  }
-
-  /**
-   * Get data version
-   */
-  private getDataVersion<T>(data: T[]): string {
-    if (data.length === 0) return '0';
-    
-    // Create version from data characteristics
-    const characteristics = {
-      count: data.length,
-      firstId: (data[0] as any).id || '',
-      lastId: (data[data.length - 1] as any).id || '',
-      timestamp: Date.now()
-    };
-    
-    return Buffer.from(JSON.stringify(characteristics))
-      .toString('base64')
-      .substring(0, 12);
-  }
-
-  /**
-   * Generate checksum for data integrity
-   */
-  private generateChecksum(data: string): string {
-    let hash = 0;
-    for (let i = 0; i < data.length; i++) {
-      const char = data.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return Math.abs(hash).toString(36);
-  }
-
-  /**
-   * Evict cache entries based on policy
-   */
-  private async evictEntries(requiredSpace: number): Promise<void> {
-    const candidates = this.getEvictionCandidates();
-    let freedSpace = 0;
-    
-    for (const candidate of candidates) {
-      if (freedSpace >= requiredSpace && this.memoryCache.size <= this.policy.maxSize) {
-        break;
-      }
-      
-      const entry = this.memoryCache.get(candidate.key);
-      if (entry) {
-        this.memoryCache.delete(candidate.key);
-        this.accessOrder.delete(candidate.key);
-        this.currentMemoryUsage -= entry.size;
-        freedSpace += entry.size;
-        
-        if (this.policy.persistToStorage) {
-          await this.removeFromStorage(candidate.key);
-        }
-      }
-    }
-  }
-
-  /**
-   * Get eviction candidates based on policy
-   */
-  private getEvictionCandidates(): EvictionCandidate[] {
-    const candidates: EvictionCandidate[] = [];
-    const now = Date.now();
-    
-    for (const [key, entry] of this.memoryCache.entries()) {
-      const age = now - entry.timestamp;
-      const lastAccess = this.accessOrder.get(key) || entry.timestamp;
-      
-      let score: number;
-      
-      switch (this.policy.evictionPolicy) {
-        case 'lru':
-          score = now - lastAccess;
-          break;
-        case 'lfu':
-          score = 1 / (entry.hits + 1);
-          break;
-        case 'fifo':
-          score = age;
-          break;
-        case 'ttl':
-          score = entry.ttl - age;
-          break;
-        default:
-          score = age;
-      }
-      
-      candidates.push({
-        key,
-        score,
-        size: entry.size,
-        age
-      });
-    }
-    
-    // Sort by score (higher score = better eviction candidate)
-    return candidates.sort((a, b) => b.score - a.score);
-  }
-
-  /**
-   * Update access order for LRU
-   */
-  private updateAccessOrder(key: string): void {
-    this.accessOrder.set(key, Date.now());
-    
-    // Limit access order map size
-    if (this.accessOrder.size > this.policy.maxSize * 2) {
-      const entries = Array.from(this.accessOrder.entries());
-      entries.sort((a, b) => a[1] - b[1]);
-      
-      // Remove oldest half
-      const toRemove = Math.floor(entries.length / 2);
-      for (let i = 0; i < toRemove; i++) {
-        this.accessOrder.delete(entries[i][0]);
-      }
-    }
-  }
-
-  /**
-   * Prune differential cache
-   */
-  private pruneDifferentialCache(): void {
-    const entries = Array.from(this.differentialCache.entries());
-    entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-    
-    // Remove oldest half
-    const toRemove = Math.floor(entries.length / 2);
-    for (let i = 0; i < toRemove; i++) {
-      this.differentialCache.delete(entries[i][0]);
-    }
-  }
-
-  /**
-   * Initialize storage
-   */
-  private async initializeStorage(): Promise<void> {
-    if (!this.policy.persistToStorage) return;
-    
+  private async initialize(): Promise<void> {
     try {
-      // Check storage quota
+      // Load storage quota
+      await this.updateStorageQuota();
+      
+      // Initialize from storage
+      await this.initializeFromStorage();
+      
+      // Start cleanup interval
+      this.startCleanupInterval();
+      
+      console.log('CacheManager initialized', {
+        memoryLimit: this.formatBytes(this.policy.maxMemorySize),
+        storageQuota: this.formatBytes(this.storageQuota),
+      });
+    } catch (error) {
+      console.error('Failed to initialize CacheManager:', error);
+    }
+  }
+
+  /**
+   * Start automatic cleanup interval
+   */
+  private startCleanupInterval(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+
+    this.cleanupInterval = setInterval(() => {
+      this.prune();
+    }, this.policy.cleanupInterval);
+  }
+
+  /**
+   * Update storage quota information
+   */
+  private async updateStorageQuota(): Promise<void> {
+    try {
       if ('storage' in navigator && 'estimate' in navigator.storage) {
         const estimate = await navigator.storage.estimate();
-        this.storageQuota = estimate.quota || this.storageQuota;
+        if (estimate.quota) {
+          this.storageQuota = Math.min(
+            estimate.quota,
+            this.policy.maxStorageSize
+          );
+        }
       }
-      
-      // Load persisted entries
-      const keys = this.getStorageKeys();
-      for (const key of keys) {
-        if (this.memoryCache.size >= this.policy.maxSize) break;
-        
-        const entry = await this.getFromStorage(key.replace('cache:', ''));
-        if (entry && this.isValidEntry(entry)) {
-          this.memoryCache.set(key.replace('cache:', ''), entry);
-          this.currentMemoryUsage += entry.size;
+    } catch (error) {
+      console.warn('Failed to get storage quota:', error);
+    }
+  }
+
+  /**
+   * Initialize cache from localStorage
+   */
+  private async initializeFromStorage(): Promise<void> {
+    if (!this.policy.persistToStorage) return;
+
+    try {
+      const keys = Object.keys(localStorage);
+      const cacheKeys = keys.filter(key => key.startsWith('cache:'));
+
+      for (const storageKey of cacheKeys) {
+        try {
+          const data = localStorage.getItem(storageKey);
+          if (data) {
+            const entry = JSON.parse(data) as CacheEntry;
+            const key = storageKey.replace('cache:', '');
+
+            if (this.isValidEntry(entry)) {
+              this.memoryCache.set(key, entry);
+              this.currentMemoryUsage += entry.size;
+            } else {
+              localStorage.removeItem(storageKey);
+            }
+          }
+        } catch (error) {
+          console.warn(`Failed to load cache entry ${storageKey}:`, error);
+          localStorage.removeItem(storageKey);
         }
       }
     } catch (error) {
@@ -835,38 +269,224 @@ export class CacheManager {
     }
   }
 
+  // ============================================================================
+  // CORE CACHE OPERATIONS
+  // ============================================================================
+
   /**
-   * Save to storage
+   * Set cache entry
    */
-  private async saveToStorage<T>(key: string, entry: CacheEntry<T>): Promise<void> {
-    if (!this.policy.persistToStorage) return;
-    
+  public async set<T>(
+    key: string,
+    data: T,
+    ttl: number = this.policy.defaultTTL
+  ): Promise<boolean> {
     try {
-      const storageKey = `cache:${key}`;
-      const data = JSON.stringify(entry);
-      
-      // Check storage quota
-      const size = new Blob([data]).size;
-      const used = await this.getStorageUsage();
-      
-      if (used + size > this.storageQuota * 0.9) {
-        // Clear old entries if approaching quota
-        await this.clearOldStorageEntries();
+      const size = this.estimateSize(data);
+      const entry: CacheEntry<T> = {
+        key,
+        data,
+        timestamp: Date.now(),
+        ttl,
+        size,
+        hits: 0,
+        lastAccessed: Date.now(),
+      };
+
+      // Check if we need to evict entries
+      if (this.currentMemoryUsage + size > this.policy.maxMemorySize) {
+        await this.evict(size);
       }
-      
-      localStorage.setItem(storageKey, data);
+
+      // Set in memory cache
+      this.memoryCache.set(key, entry);
+      this.currentMemoryUsage += size;
+
+      // Save to storage with retry logic
+      await this.saveToStorageWithRetry(key, entry);
+
+      return true;
     } catch (error) {
-      // Handle quota exceeded
-      if (error instanceof DOMException && error.name === 'QuotaExceededError') {
-        await this.clearOldStorageEntries();
-        try {
-          const storageKey = `cache:${key}`;
-          localStorage.setItem(storageKey, JSON.stringify(entry));
-        } catch (retryError) {
-          console.warn('Failed to save to storage after cleanup:', retryError);
+      console.error(`Failed to set cache entry ${key}:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get cache entry
+   */
+  public async get<T>(key: string): Promise<T | null> {
+    // Check memory cache first
+    const entry = this.memoryCache.get(key) as CacheEntry<T> | undefined;
+
+    if (entry) {
+      // Check if expired
+      const age = Date.now() - entry.timestamp;
+      if (age > entry.ttl) {
+        await this.delete(key);
+        this.stats.misses++;
+        return null;
+      }
+
+      // Update stats
+      entry.hits++;
+      entry.lastAccessed = Date.now();
+      this.stats.hits++;
+      
+      return entry.data;
+    }
+
+    // Try storage cache
+    const storageEntry = await this.getFromStorage<T>(key);
+    if (storageEntry) {
+      // Restore to memory cache
+      this.memoryCache.set(key, storageEntry);
+      this.currentMemoryUsage += storageEntry.size;
+      this.stats.hits++;
+      return storageEntry.data;
+    }
+
+    this.stats.misses++;
+    return null;
+  }
+
+  /**
+   * Delete cache entry
+   */
+  public async delete(key: string): Promise<boolean> {
+    const entry = this.memoryCache.get(key);
+    
+    if (entry) {
+      this.memoryCache.delete(key);
+      this.currentMemoryUsage -= entry.size;
+    }
+
+    await this.removeFromStorage(key);
+    this.retryAttempts.delete(key);
+    
+    return true;
+  }
+
+  /**
+   * Clear all cache
+   */
+  public async clear(): Promise<void> {
+    this.memoryCache.clear();
+    this.differentialCache.clear();
+    this.currentMemoryUsage = 0;
+    this.stats.evictions = 0;
+    this.retryAttempts.clear();
+
+    if (this.policy.persistToStorage) {
+      try {
+        const keys = Object.keys(localStorage);
+        const cacheKeys = keys.filter(key => key.startsWith('cache:'));
+        cacheKeys.forEach(key => localStorage.removeItem(key));
+      } catch (error) {
+        console.error('Failed to clear storage cache:', error);
+      }
+    }
+  }
+
+  // ============================================================================
+  // STORAGE OPERATIONS WITH RETRY LOGIC
+  // ============================================================================
+
+  /**
+   * Save to storage with retry logic (FIXES INFINITE LOOP BUG)
+   */
+  private async saveToStorageWithRetry<T>(
+    key: string,
+    entry: CacheEntry<T>
+  ): Promise<StorageOperationResult> {
+    if (!this.policy.persistToStorage) {
+      return { success: true };
+    }
+
+    const storageKey = `cache:${key}`;
+    let retries = 0;
+    const maxRetries = MAX_STORAGE_RETRIES;
+
+    while (retries < maxRetries) {
+      try {
+        const data = JSON.stringify(entry);
+        const size = new Blob([data]).size;
+
+        // Check storage quota before attempting to save
+        const used = await this.getStorageUsage();
+        if (used + size > this.storageQuota * STORAGE_QUOTA_THRESHOLD) {
+          console.warn(
+            `Storage approaching quota (${this.formatBytes(used)}/${this.formatBytes(this.storageQuota)})`
+          );
+          
+          // Try to clear old entries
+          const cleared = await this.clearOldStorageEntries();
+          
+          if (!cleared) {
+            console.error('Failed to free storage space, skipping storage persist');
+            return { 
+              success: false, 
+              error: 'Storage quota exceeded',
+              retriesUsed: retries 
+            };
+          }
+        }
+
+        // Attempt to save
+        localStorage.setItem(storageKey, data);
+        this.retryAttempts.delete(key);
+        return { success: true, retriesUsed: retries };
+
+      } catch (error) {
+        retries++;
+
+        // Handle quota exceeded error
+        if (error instanceof DOMException && error.name === 'QuotaExceededError') {
+          console.warn(
+            `QuotaExceededError on attempt ${retries}/${maxRetries} for key ${key}`
+          );
+
+          // Try to free space
+          const cleared = await this.clearOldStorageEntries();
+          
+          if (!cleared && retries >= maxRetries) {
+            console.error(
+              `Failed to save ${key} after ${retries} attempts. Storage quota persistently exceeded.`
+            );
+            return { 
+              success: false, 
+              error: 'QuotaExceededError - unable to free space',
+              retriesUsed: retries 
+            };
+          }
+
+          // Wait before retry
+          if (retries < maxRetries) {
+            await this.delay(STORAGE_RETRY_DELAY * retries);
+          }
+        } else {
+          // Non-quota error, don't retry
+          console.error(`Storage error for ${key}:`, error);
+          return { 
+            success: false, 
+            error: error instanceof Error ? error.message : 'Unknown error',
+            retriesUsed: retries 
+          };
         }
       }
     }
+
+    // Max retries reached
+    console.error(
+      `Failed to save ${key} to storage after ${maxRetries} attempts`
+    );
+    this.retryAttempts.set(key, (this.retryAttempts.get(key) || 0) + 1);
+    
+    return { 
+      success: false, 
+      error: `Max retries (${maxRetries}) exceeded`,
+      retriesUsed: retries 
+    };
   }
 
   /**
@@ -874,14 +494,14 @@ export class CacheManager {
    */
   private async getFromStorage<T>(key: string): Promise<CacheEntry<T> | null> {
     if (!this.policy.persistToStorage) return null;
-    
+
     try {
       const storageKey = `cache:${key}`;
       const data = localStorage.getItem(storageKey);
-      
+
       if (data) {
         const entry = JSON.parse(data) as CacheEntry<T>;
-        
+
         // Validate entry
         if (this.isValidEntry(entry)) {
           return entry;
@@ -892,7 +512,7 @@ export class CacheManager {
     } catch (error) {
       console.warn('Failed to get from storage:', error);
     }
-    
+
     return null;
   }
 
@@ -901,186 +521,333 @@ export class CacheManager {
    */
   private async removeFromStorage(key: string): Promise<void> {
     if (!this.policy.persistToStorage) return;
-    
+
     try {
-      localStorage.removeItem(`cache:${key}`);
+      const storageKey = `cache:${key}`;
+      localStorage.removeItem(storageKey);
     } catch (error) {
-      console.warn('Failed to remove from storage:', error);
+      console.warn(`Failed to remove ${key} from storage:`, error);
     }
   }
 
   /**
-   * Clear storage
+   * Clear old storage entries to free space
    */
-  private async clearStorage(): Promise<void> {
-    if (!this.policy.persistToStorage) return;
-    
+  private async clearOldStorageEntries(): Promise<boolean> {
     try {
-      const keys = this.getStorageKeys();
-      for (const key of keys) {
-        localStorage.removeItem(key);
+      const keys = Object.keys(localStorage);
+      const cacheKeys = keys.filter(key => key.startsWith('cache:'));
+
+      if (cacheKeys.length === 0) {
+        return false;
       }
+
+      // Sort by timestamp (oldest first)
+      const entries: Array<{ key: string; entry: CacheEntry; storageKey: string }> = [];
+
+      for (const storageKey of cacheKeys) {
+        try {
+          const data = localStorage.getItem(storageKey);
+          if (data) {
+            const entry = JSON.parse(data) as CacheEntry;
+            entries.push({
+              key: storageKey.replace('cache:', ''),
+              entry,
+              storageKey,
+            });
+          }
+        } catch (error) {
+          // Invalid entry, remove it
+          localStorage.removeItem(storageKey);
+        }
+      }
+
+      // Sort by last accessed time
+      entries.sort((a, b) => a.entry.lastAccessed - b.entry.lastAccessed);
+
+      // Remove oldest 25% of entries
+      const toRemove = Math.max(1, Math.floor(entries.length * 0.25));
+      let removed = 0;
+
+      for (let i = 0; i < toRemove && i < entries.length; i++) {
+        try {
+          localStorage.removeItem(entries[i].storageKey);
+          this.memoryCache.delete(entries[i].key);
+          removed++;
+        } catch (error) {
+          console.warn(`Failed to remove ${entries[i].storageKey}:`, error);
+        }
+      }
+
+      console.log(`Cleared ${removed} old storage entries`);
+      return removed > 0;
+
     } catch (error) {
-      console.warn('Failed to clear storage:', error);
+      console.error('Failed to clear old storage entries:', error);
+      return false;
     }
   }
 
   /**
-   * Get all storage keys
-   */
-  private getStorageKeys(): string[] {
-    const keys: string[] = [];
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith('cache:')) {
-        keys.push(key);
-      }
-    }
-    
-    return keys;
-  }
-
-  /**
-   * Get storage usage
+   * Get current storage usage
    */
   private async getStorageUsage(): Promise<number> {
-    let total = 0;
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith('cache:')) {
+    try {
+      if ('storage' in navigator && 'estimate' in navigator.storage) {
+        const estimate = await navigator.storage.estimate();
+        return estimate.usage || 0;
+      }
+
+      // Fallback: estimate from localStorage
+      let total = 0;
+      const keys = Object.keys(localStorage);
+      for (const key of keys) {
         const value = localStorage.getItem(key);
         if (value) {
-          total += new Blob([key, value]).size;
+          total += key.length + value.length;
         }
       }
+      return total * 2; // UTF-16 encoding
+    } catch (error) {
+      console.warn('Failed to get storage usage:', error);
+      return 0;
     }
-    
-    return total;
   }
 
+  // ============================================================================
+  // EVICTION POLICIES
+  // ============================================================================
+
   /**
-   * Clear old storage entries
+   * Evict entries to make space
    */
-  private async clearOldStorageEntries(): Promise<void> {
-    const entries: Array<{ key: string; timestamp: number }> = [];
-    
-    for (const key of this.getStorageKeys()) {
-      const data = localStorage.getItem(key);
-      if (data) {
-        try {
-          const entry = JSON.parse(data) as CacheEntry<any>;
-          entries.push({ key, timestamp: entry.timestamp });
-        } catch {
-          localStorage.removeItem(key);
-        }
+  private async evict(requiredSpace: number): Promise<void> {
+    const entries = Array.from(this.memoryCache.entries());
+
+    if (entries.length === 0) return;
+
+    // Sort based on eviction policy
+    switch (this.policy.evictionPolicy) {
+      case 'lru':
+        entries.sort((a, b) => a[1].lastAccessed - b[1].lastAccessed);
+        break;
+      case 'lfu':
+        entries.sort((a, b) => a[1].hits - b[1].hits);
+        break;
+      case 'fifo':
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+        break;
+    }
+
+    // Evict entries until we have enough space
+    let freedSpace = 0;
+    const toEvict: string[] = [];
+
+    for (const [key, entry] of entries) {
+      toEvict.push(key);
+      freedSpace += entry.size;
+      this.stats.evictions++;
+
+      if (freedSpace >= requiredSpace) {
+        break;
       }
     }
-    
-    // Sort by timestamp and remove oldest half
-    entries.sort((a, b) => a.timestamp - b.timestamp);
-    const toRemove = Math.ceil(entries.length / 2);
-    
-    for (let i = 0; i < toRemove; i++) {
-      localStorage.removeItem(entries[i].key);
+
+    // Remove evicted entries
+    for (const key of toEvict) {
+      await this.delete(key);
     }
-  }
 
-  /**
-   * Validate cache entry
-   */
-  private isValidEntry(entry: CacheEntry<any>): boolean {
-    if (!entry.timestamp || !entry.ttl) return false;
-    
-    const age = Date.now() - entry.timestamp;
-    return age <= entry.ttl;
-  }
-
-  /**
-   * Start cleanup interval
-   */
-  private startCleanupInterval(): void {
-    this.cleanupInterval = setInterval(() => {
-      this.prune();
-    }, 60000); // Run every minute
+    console.log(`Evicted ${toEvict.length} entries, freed ${this.formatBytes(freedSpace)}`);
   }
 
   /**
    * Prune expired entries
    */
-  prune(): number {
+  public prune(): void {
     const now = Date.now();
-    let pruned = 0;
-    
+    const toDelete: string[] = [];
+
     for (const [key, entry] of this.memoryCache.entries()) {
       const age = now - entry.timestamp;
       if (age > entry.ttl) {
-        this.memoryCache.delete(key);
-        this.accessOrder.delete(key);
-        this.currentMemoryUsage -= entry.size;
-        
-        if (this.policy.persistToStorage) {
-          this.removeFromStorage(key);
-        }
-        
-        pruned++;
+        toDelete.push(key);
       }
     }
-    
-    // Prune old differentials
-    for (const [key, entry] of this.differentialCache.entries()) {
-      const age = now - entry.timestamp;
-      if (age > 300000) { // 5 minutes
-        this.differentialCache.delete(key);
-        pruned++;
-      }
+
+    for (const key of toDelete) {
+      this.delete(key);
     }
-    
-    return pruned;
+
+    if (toDelete.length > 0) {
+      console.log(`Pruned ${toDelete.length} expired entries`);
+    }
   }
+
+  // ============================================================================
+  // DIFFERENTIAL CACHING
+  // ============================================================================
+
+  /**
+   * Set differential cache entry
+   */
+  public setDifferential<T>(
+    key: string,
+    baseVersion: string,
+    delta: Partial<T>,
+    checksum?: string
+  ): void {
+    const size = this.estimateSize(delta);
+    const entry: DifferentialEntry<T> = {
+      baseVersion,
+      delta,
+      timestamp: Date.now(),
+      size,
+      checksum,
+    };
+
+    this.differentialCache.set(key, entry);
+  }
+
+  /**
+   * Get differential cache entry
+   */
+  public getDifferential<T>(key: string): DifferentialEntry<T> | null {
+    const entry = this.differentialCache.get(key) as DifferentialEntry<T> | undefined;
+
+    if (entry) {
+      this.stats.differentialHits++;
+      return entry;
+    }
+
+    this.stats.differentialMisses++;
+    return null;
+  }
+
+  // ============================================================================
+  // UTILITY FUNCTIONS
+  // ============================================================================
+
+  /**
+   * Validate cache entry
+   */
+  private isValidEntry(entry: CacheEntry): boolean {
+    const now = Date.now();
+    const age = now - entry.timestamp;
+    return (
+      entry &&
+      typeof entry === 'object' &&
+      'data' in entry &&
+      'timestamp' in entry &&
+      'ttl' in entry &&
+      age <= entry.ttl
+    );
+  }
+
+  /**
+   * Estimate data size in bytes
+   */
+  private estimateSize(data: any): number {
+    try {
+      const json = JSON.stringify(data);
+      return new Blob([json]).size;
+    } catch (error) {
+      // Rough estimation if stringify fails
+      return 1024; // 1KB default
+    }
+  }
+
+  /**
+   * Format bytes for display
+   */
+  private formatBytes(bytes: number): string {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  /**
+   * Delay helper for retries
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // ============================================================================
+  // STATISTICS
+  // ============================================================================
 
   /**
    * Get cache statistics
    */
-  getStats(): CacheStats {
-    const entries = Array.from(this.memoryCache.values());
-    const timestamps = entries.map(e => e.timestamp);
-    const ttls = entries.map(e => e.ttl);
-    
-    const hitRate = this.stats.hits / Math.max(1, this.stats.hits + this.stats.misses);
-    const differentialHitRate = this.stats.differentialHits / 
-      Math.max(1, this.stats.differentialHits + this.stats.differentialMisses);
-    
-    const compressionRatio = entries.reduce((acc, entry) => {
-      if (entry.compressed) {
-        return acc + (entry.size / entry.value.length);
-      }
-      return acc;
-    }, 0) / Math.max(1, entries.filter(e => e.compressed).length);
-    
+  public getStats(): CacheStats {
+    const memoryEntries = this.memoryCache.size;
+    const storageEntries = this.getStorageEntryCount();
+    const totalRequests = this.stats.hits + this.stats.misses;
+    const hitRate = totalRequests > 0 ? this.stats.hits / totalRequests : 0;
+
+    const timestamps = Array.from(this.memoryCache.values()).map(e => e.timestamp);
+    const ttls = Array.from(this.memoryCache.values()).map(e => e.ttl);
+
+    const differentialTotal = this.stats.differentialHits + this.stats.differentialMisses;
+    const differentialHitRate = differentialTotal > 0 
+      ? this.stats.differentialHits / differentialTotal 
+      : 0;
+
     return {
-      size: this.memoryCache.size,
+      memoryEntries,
+      memorySize: this.currentMemoryUsage,
+      storageEntries,
+      storageSize: this.getStorageSize(),
       hits: this.stats.hits,
       misses: this.stats.misses,
       hitRate,
-      memoryUsage: this.currentMemoryUsage,
-      maxMemory: this.policy.maxMemory,
-      compressionRatio: compressionRatio || 1,
+      evictions: this.stats.evictions,
       oldestEntry: timestamps.length > 0 ? Math.min(...timestamps) : null,
       newestEntry: timestamps.length > 0 ? Math.max(...timestamps) : null,
       averageTTL: ttls.length > 0 ? ttls.reduce((a, b) => a + b, 0) / ttls.length : 0,
       differentialCount: this.differentialCache.size,
       differentialMemory: Array.from(this.differentialCache.values())
         .reduce((acc, entry) => acc + entry.size, 0),
-      differentialHitRate
+      differentialHitRate,
     };
+  }
+
+  /**
+   * Get storage entry count
+   */
+  private getStorageEntryCount(): number {
+    try {
+      const keys = Object.keys(localStorage);
+      return keys.filter(key => key.startsWith('cache:')).length;
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  /**
+   * Get storage size
+   */
+  private getStorageSize(): number {
+    try {
+      let total = 0;
+      const keys = Object.keys(localStorage).filter(key => key.startsWith('cache:'));
+      for (const key of keys) {
+        const value = localStorage.getItem(key);
+        if (value) {
+          total += (key.length + value.length) * 2; // UTF-16
+        }
+      }
+      return total;
+    } catch (error) {
+      return 0;
+    }
   }
 
   /**
    * Get all valid cache keys
    */
-  keys(): string[] {
+  public keys(): string[] {
     this.prune();
     return Array.from(this.memoryCache.keys());
   }
@@ -1088,86 +855,42 @@ export class CacheManager {
   /**
    * Check if key exists and is valid
    */
-  has(key: string): boolean {
+  public has(key: string): boolean {
     const entry = this.memoryCache.get(key);
     if (!entry) return false;
-    
+
     const age = Date.now() - entry.timestamp;
     if (age > entry.ttl) {
       this.memoryCache.delete(key);
       this.currentMemoryUsage -= entry.size;
       return false;
     }
-    
+
     return true;
   }
 
-  /**
-   * Get memory usage for specific key
-   */
-  getKeySize(key: string): number {
-    const entry = this.memoryCache.get(key);
-    return entry ? entry.size : 0;
-  }
-
-  /**
-   * Export cache for debugging
-   */
-  async export(): Promise<{
-    entries: Array<{ key: string; entry: CacheEntry<any> }>;
-    differentials: Array<{ key: string; entry: DifferentialEntry<any> }>;
-    stats: CacheStats;
-  }> {
-    return {
-      entries: Array.from(this.memoryCache.entries()).map(([key, entry]) => ({
-        key,
-        entry
-      })),
-      differentials: Array.from(this.differentialCache.entries()).map(([key, entry]) => ({
-        key,
-        entry
-      })),
-      stats: this.getStats()
-    };
-  }
-
-  /**
-   * Import cache (for debugging/migration)
-   */
-  async import(data: {
-    entries: Array<{ key: string; entry: CacheEntry<any> }>;
-    differentials?: Array<{ key: string; entry: DifferentialEntry<any> }>;
-  }): Promise<void> {
-    // Clear existing cache
-    await this.clear();
-    
-    // Import entries
-    for (const { key, entry } of data.entries) {
-      this.memoryCache.set(key, entry);
-      this.currentMemoryUsage += entry.size;
-    }
-    
-    // Import differentials if provided
-    if (data.differentials) {
-      for (const { key, entry } of data.differentials) {
-        this.differentialCache.set(key, entry);
-      }
-    }
-  }
+  // ============================================================================
+  // CLEANUP
+  // ============================================================================
 
   /**
    * Destroy cache manager and cleanup
    */
-  destroy(): void {
+  public destroy(): void {
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
-    
+
     this.clear();
-    CacheManager.instance = null;
+    this.retryAttempts.clear();
   }
 }
 
-// Export singleton instance
+// ============================================================================
+// EXPORT SINGLETON INSTANCE
+// ============================================================================
+
 export const cacheManager = CacheManager.getInstance();
+
+export default cacheManager;
