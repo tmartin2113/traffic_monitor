@@ -32,7 +32,7 @@ export function useApiKeyManager(): UseApiKeyManagerResult {
   const isValidFormat = useCallback((key: string): boolean => {
     if (!key || typeof key !== 'string') return false;
     // Basic validation - API keys are typically alphanumeric and at least 20 characters
-    const keyPattern = /^[a-zA-Z0-9]{20,}$/;
+    const keyPattern = /^[a-zA-Z0-9_-]{20,64}$/;
     return keyPattern.test(key.trim());
   }, []);
 
