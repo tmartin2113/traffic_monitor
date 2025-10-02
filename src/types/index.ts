@@ -182,8 +182,8 @@ export const TypeGuards = {
     return (
       typeof value === 'object' &&
       value !== null &&
-      'eventType' in value ||
-      'severity' in value ||
+      'eventType' in value &&
+      'severity' in value &&
       'searchTerm' in value
     );
   },
