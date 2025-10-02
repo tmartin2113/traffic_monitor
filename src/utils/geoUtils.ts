@@ -1,56 +1,104 @@
 /**
- * Geographic Utility Functions
- * Utilities for coordinate calculations and geofencing
+ * @file utils/geoUtils.ts
+ * @description Geospatial utility functions with consistent coordinate handling
+ * @version 2.0.0
+ * 
+ * CRITICAL COORDINATE ORDER CONVENTION:
+ * ========================================
+ * GeoJSON Standard: [longitude, latitude] (X, Y)
+ * Leaflet/Map Libraries: [latitude, longitude] (Y, X)
+ * 
+ * This file uses GEOJSON STANDARD [lng, lat] internally for all coordinates.
+ * Conversion functions are provided for Leaflet compatibility.
  */
 
-import { GEOFENCE } from './constants';
-import type { MapCenter, MapBounds } from '@/types/map.types';
-import type { Geography } from '@/types/api.types';
+import { MapCenter, MapBounds } from '@types/map.types';
+import { TrafficEvent } from '@types/api.types';
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
 
 /**
- * Calculate distance between two points using Haversine formula
- * @returns Distance in meters
+ * GeoJSON coordinate pair: [longitude, latitude]
  */
-export function calculateDistance(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number
-): number {
-  const R = 6371e3; // Earth's radius in meters
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δφ = ((lat2 - lat1) * Math.PI) / 180;
-  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
+export type GeoJSONCoordinate = [number, number];
 
-  const a =
-    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-  
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+/**
+ * Leaflet coordinate pair: [latitude, longitude]
+ */
+export type LeafletCoordinate = [number, number];
 
-  return R * c;
+/**
+ * Geography types from 511 API
+ */
+export interface Geography {
+  type: 'Point' | 'LineString' | 'MultiLineString' | 'Polygon' | 'MultiPolygon';
+  coordinates: number[] | number[][] | number[][][];
+}
+
+// ============================================================================
+// COORDINATE CONVERSION FUNCTIONS
+// ============================================================================
+
+/**
+ * Convert GeoJSON coordinates [lng, lat] to Leaflet format [lat, lng]
+ */
+export function geoJsonToLeaflet(coord: GeoJSONCoordinate): LeafletCoordinate {
+  return [coord[1], coord[0]];
 }
 
 /**
- * Check if coordinates are within geofence
+ * Convert Leaflet coordinates [lat, lng] to GeoJSON format [lng, lat]
  */
-export function isWithinGeofence(lat: number, lng: number): boolean {
-  return (
-    lat >= GEOFENCE.BBOX.ymin &&
-    lat <= GEOFENCE.BBOX.ymax &&
-    lng >= GEOFENCE.BBOX.xmin &&
-    lng <= GEOFENCE.BBOX.xmax
-  );
+export function leafletToGeoJson(coord: LeafletCoordinate): GeoJSONCoordinate {
+  return [coord[1], coord[0]];
 }
 
 /**
- * Check if point is within bounds
+ * Convert GeoJSON coordinates to MapCenter object
  */
-export function isWithinBounds(
-  point: MapCenter,
-  bounds: MapBounds
-): boolean {
+export function geoJsonToMapCenter(coord: GeoJSONCoordinate): MapCenter {
+  return {
+    lng: coord[0],
+    lat: coord[1]
+  };
+}
+
+/**
+ * Convert MapCenter to GeoJSON coordinates
+ */
+export function mapCenterToGeoJson(center: MapCenter): GeoJSONCoordinate {
+  return [center.lng, center.lat];
+}
+
+/**
+ * Convert MapCenter to Leaflet coordinates
+ */
+export function mapCenterToLeaflet(center: MapCenter): LeafletCoordinate {
+  return [center.lat, center.lng];
+}
+
+/**
+ * Convert Leaflet coordinates to MapCenter
+ */
+export function leafletToMapCenter(coord: LeafletCoordinate): MapCenter {
+  return {
+    lat: coord[0],
+    lng: coord[1]
+  };
+}
+
+// ============================================================================
+// GEOFENCING FUNCTIONS
+// ============================================================================
+
+/**
+ * Check if a point is within a bounding box
+ * @param point - MapCenter with lat/lng
+ * @param bounds - MapBounds object
+ */
+export function isWithinBounds(point: MapCenter, bounds: MapBounds): boolean {
   return (
     point.lat >= bounds.south &&
     point.lat <= bounds.north &&
@@ -60,36 +108,117 @@ export function isWithinBounds(
 }
 
 /**
- * Check if point is within radius of center
+ * Check if a GeoJSON coordinate is within bounds
+ * @param coord - GeoJSON coordinate [lng, lat]
+ * @param bounds - MapBounds object
  */
-export function isWithinRadius(
-  point: MapCenter,
-  center: MapCenter,
-  radius: number // in meters
-): boolean {
-  const distance = calculateDistance(
-    point.lat,
-    point.lng,
-    center.lat,
-    center.lng
+export function isGeoJsonWithinBounds(coord: GeoJSONCoordinate, bounds: MapBounds): boolean {
+  const [lng, lat] = coord;
+  return (
+    lat >= bounds.south &&
+    lat <= bounds.north &&
+    lng >= bounds.west &&
+    lng <= bounds.east
   );
-  
-  return distance <= radius;
+}
+
+/**
+ * Check if a point is within a geofence (bounding box)
+ * @param lat - Latitude
+ * @param lng - Longitude
+ * @param bounds - MapBounds object
+ */
+export function isWithinGeofence(lat: number, lng: number, bounds: MapBounds): boolean {
+  return (
+    lat >= bounds.south &&
+    lat <= bounds.north &&
+    lng >= bounds.west &&
+    lng <= bounds.east
+  );
+}
+
+/**
+ * Check if a point is within a polygon using ray casting algorithm
+ * @param point - MapCenter with lat/lng
+ * @param polygon - Array of MapCenter points forming polygon
+ */
+export function isPointInPolygon(point: MapCenter, polygon: MapCenter[]): boolean {
+  let inside = false;
+  const x = point.lng;
+  const y = point.lat;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].lng;
+    const yi = polygon[i].lat;
+    const xj = polygon[j].lng;
+    const yj = polygon[j].lat;
+
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+
+    if (intersect) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+/**
+ * Check if bounds intersect with a geofence
+ */
+export function boundsIntersectGeofence(bounds: MapBounds, geofence: MapBounds): boolean {
+  return !(
+    bounds.east < geofence.west ||
+    bounds.west > geofence.east ||
+    bounds.north < geofence.south ||
+    bounds.south > geofence.north
+  );
+}
+
+// ============================================================================
+// DISTANCE CALCULATIONS
+// ============================================================================
+
+/**
+ * Calculate distance between two points using Haversine formula
+ * Returns distance in meters
+ * @param point1 - First point
+ * @param point2 - Second point
+ */
+export function calculateDistance(point1: MapCenter, point2: MapCenter): number {
+  const R = 6371000; // Earth's radius in meters
+  const φ1 = (point1.lat * Math.PI) / 180;
+  const φ2 = (point2.lat * Math.PI) / 180;
+  const Δφ = ((point2.lat - point1.lat) * Math.PI) / 180;
+  const Δλ = ((point2.lng - point1.lng) * Math.PI) / 180;
+
+  const a =
+    Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return R * c;
+}
+
+/**
+ * Calculate distance from GeoJSON coordinates
+ */
+export function calculateDistanceGeoJson(
+  coord1: GeoJSONCoordinate,
+  coord2: GeoJSONCoordinate
+): number {
+  return calculateDistance(geoJsonToMapCenter(coord1), geoJsonToMapCenter(coord2));
 }
 
 /**
  * Calculate bearing between two points
- * @returns Bearing in degrees (0-360)
+ * Returns bearing in degrees (0-360)
  */
-export function calculateBearing(
-  lat1: number,
-  lng1: number,
-  lat2: number,
-  lng2: number
-): number {
-  const φ1 = (lat1 * Math.PI) / 180;
-  const φ2 = (lat2 * Math.PI) / 180;
-  const Δλ = ((lng2 - lng1) * Math.PI) / 180;
+export function calculateBearing(point1: MapCenter, point2: MapCenter): number {
+  const φ1 = (point1.lat * Math.PI) / 180;
+  const φ2 = (point2.lat * Math.PI) / 180;
+  const Δλ = ((point2.lng - point1.lng) * Math.PI) / 180;
 
   const y = Math.sin(Δλ) * Math.cos(φ2);
   const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
@@ -108,6 +237,10 @@ export function getCompassDirection(bearing: number): string {
   return directions[index];
 }
 
+// ============================================================================
+// BOUNDS CALCULATIONS
+// ============================================================================
+
 /**
  * Calculate bounds from center and radius
  */
@@ -115,7 +248,6 @@ export function calculateBoundsFromRadius(
   center: MapCenter,
   radius: number // in meters
 ): MapBounds {
-  // Rough approximation
   const lat = center.lat;
   const lng = center.lng;
   
@@ -166,12 +298,30 @@ export function calculateBoundsFromPoints(points: MapCenter[]): MapBounds | null
 }
 
 /**
- * Extend bounds to include point
+ * Calculate bounds from GeoJSON coordinates
  */
-export function extendBounds(
-  bounds: MapBounds,
-  point: MapCenter
-): MapBounds {
+export function calculateBoundsFromGeoJson(coords: GeoJSONCoordinate[]): MapBounds | null {
+  if (coords.length === 0) return null;
+
+  let north = -90;
+  let south = 90;
+  let east = -180;
+  let west = 180;
+
+  for (const [lng, lat] of coords) {
+    north = Math.max(north, lat);
+    south = Math.min(south, lat);
+    east = Math.max(east, lng);
+    west = Math.min(west, lng);
+  }
+
+  return { north, south, east, west };
+}
+
+/**
+ * Extend bounds to include a point
+ */
+export function extendBounds(bounds: MapBounds, point: MapCenter): MapBounds {
   return {
     north: Math.max(bounds.north, point.lat),
     south: Math.min(bounds.south, point.lat),
@@ -194,49 +344,108 @@ export function isValidBounds(bounds: MapBounds): boolean {
   );
 }
 
+// ============================================================================
+// GEOGRAPHY PROCESSING
+// ============================================================================
+
 /**
- * Convert geography to coordinates array
+ * Convert Geography object to coordinate array
+ * Returns GeoJSON coordinate order: [lng, lat]
  */
 export function geographyToCoordinates(geography: Geography): number[] | number[][] {
-  if (geography.type === 'Point') {
-    return geography.coordinates as number[];
-  }
-  return geography.coordinates as number[][];
+  return geography.coordinates as number[] | number[][];
 }
 
 /**
- * Get bounds from geography
+ * Extract point coordinates from Geography
+ * Returns MapCenter object
  */
-export function getBoundsFromGeography(geography: Geography): MapBounds | null {
-  const coords = geographyToCoordinates(geography);
-  
-  if (geography.type === 'Point') {
-    const [lng, lat] = coords as number[];
-    return {
-      north: lat,
-      south: lat,
-      east: lng,
-      west: lng,
-    };
+export function extractPointFromGeography(geography: Geography): MapCenter | null {
+  if (geography.type !== 'Point') {
+    return null;
   }
   
-  // For LineString or MultiLineString
+  const coords = geography.coordinates as number[];
+  return {
+    lng: coords[0], // GeoJSON: longitude first
+    lat: coords[1]  // GeoJSON: latitude second
+  };
+}
+
+/**
+ * Extract line coordinates from Geography
+ * Returns array of MapCenter points
+ */
+export function extractLineFromGeography(geography: Geography): MapCenter[] | null {
+  if (geography.type !== 'LineString') {
+    return null;
+  }
+  
+  const coords = geography.coordinates as number[][];
+  return coords.map(([lng, lat]) => ({ lng, lat }));
+}
+
+/**
+ * Extract all coordinates from Geography as MapCenter array
+ */
+export function extractAllPointsFromGeography(geography: Geography): MapCenter[] {
   const points: MapCenter[] = [];
   
-  if (geography.type === 'LineString') {
-    for (const coord of coords as number[][]) {
-      points.push({ lat: coord[1], lng: coord[0] });
-    }
-  } else if (geography.type === 'MultiLineString') {
-    for (const line of coords as number[][][]) {
-      for (const coord of line) {
-        points.push({ lat: coord[1], lng: coord[0] });
+  switch (geography.type) {
+    case 'Point':
+      const point = extractPointFromGeography(geography);
+      if (point) points.push(point);
+      break;
+      
+    case 'LineString':
+      const line = extractLineFromGeography(geography);
+      if (line) points.push(...line);
+      break;
+      
+    case 'MultiLineString':
+      const coords = geography.coordinates as number[][][];
+      for (const line of coords) {
+        for (const [lng, lat] of line) {
+          points.push({ lng, lat });
+        }
       }
-    }
+      break;
+      
+    case 'Polygon':
+      const polyCoords = geography.coordinates as number[][][];
+      for (const ring of polyCoords) {
+        for (const [lng, lat] of ring) {
+          points.push({ lng, lat });
+        }
+      }
+      break;
+      
+    case 'MultiPolygon':
+      const multiPolyCoords = geography.coordinates as number[][][][];
+      for (const polygon of multiPolyCoords) {
+        for (const ring of polygon) {
+          for (const [lng, lat] of ring) {
+            points.push({ lng, lat });
+          }
+        }
+      }
+      break;
   }
   
+  return points;
+}
+
+/**
+ * Get bounds from Geography object
+ */
+export function getBoundsFromGeography(geography: Geography): MapBounds | null {
+  const points = extractAllPointsFromGeography(geography);
   return calculateBoundsFromPoints(points);
 }
+
+// ============================================================================
+// COORDINATE FORMATTING
+// ============================================================================
 
 /**
  * Format coordinates for display
@@ -246,12 +455,19 @@ export function formatCoordinates(
   lng: number,
   precision = 6
 ): string {
-  const latStr = lat.toFixed(precision);
-  const lngStr = lng.toFixed(precision);
+  const latStr = Math.abs(lat).toFixed(precision);
+  const lngStr = Math.abs(lng).toFixed(precision);
   const latDir = lat >= 0 ? 'N' : 'S';
   const lngDir = lng >= 0 ? 'E' : 'W';
   
-  return `${Math.abs(parseFloat(latStr))}°${latDir}, ${Math.abs(parseFloat(lngStr))}°${lngDir}`;
+  return `${latStr}°${latDir}, ${lngStr}°${lngDir}`;
+}
+
+/**
+ * Format MapCenter for display
+ */
+export function formatMapCenter(center: MapCenter, precision = 6): string {
+  return formatCoordinates(center.lat, center.lng, precision);
 }
 
 /**
@@ -271,10 +487,18 @@ export function formatDistance(meters: number): string {
   return `${Math.round(km)}km`;
 }
 
+// ============================================================================
+// MAP UTILITIES
+// ============================================================================
+
 /**
  * Calculate zoom level for bounds
  */
-export function calculateZoomLevel(bounds: MapBounds, mapWidth: number, mapHeight: number): number {
+export function calculateZoomLevel(
+  bounds: MapBounds,
+  mapWidth: number,
+  mapHeight: number
+): number {
   const WORLD_DIM = { height: 256, width: 256 };
   const ZOOM_MAX = 18;
 
@@ -299,21 +523,26 @@ export function calculateZoomLevel(bounds: MapBounds, mapWidth: number, mapHeigh
 }
 
 /**
- * Simplify coordinates array (Douglas-Peucker algorithm)
+ * Simplify coordinate array using Douglas-Peucker algorithm
+ * Input coordinates should be in [lng, lat] format (GeoJSON)
  */
 export function simplifyCoordinates(
-  coordinates: number[][],
+  coordinates: GeoJSONCoordinate[],
   tolerance = 0.0001
-): number[][] {
+): GeoJSONCoordinate[] {
   if (coordinates.length <= 2) return coordinates;
 
-  function getSquareDistance(p1: number[], p2: number[]): number {
+  function getSquareDistance(p1: GeoJSONCoordinate, p2: GeoJSONCoordinate): number {
     const dx = p1[0] - p2[0];
     const dy = p1[1] - p2[1];
     return dx * dx + dy * dy;
   }
 
-  function getSquareSegmentDistance(p: number[], p1: number[], p2: number[]): number {
+  function getSquareSegmentDistance(
+    p: GeoJSONCoordinate,
+    p1: GeoJSONCoordinate,
+    p2: GeoJSONCoordinate
+  ): number {
     let x = p1[0];
     let y = p1[1];
     let dx = p2[0] - x;
@@ -337,14 +566,20 @@ export function simplifyCoordinates(
     return dx * dx + dy * dy;
   }
 
-  function simplifyDouglasPeucker(points: number[][], sqTolerance: number): number[][] {
+  function simplifyDouglasPeucker(
+    points: GeoJSONCoordinate[],
+    sqTolerance: number
+  ): GeoJSONCoordinate[] {
     const len = points.length;
     const markers = new Uint8Array(len);
     let first = 0;
     let last = len - 1;
-    const stack = [];
-    const newPoints = [];
-    let i, maxSqDist, sqDist, index;
+    const stack: number[] = [];
+    const newPoints: GeoJSONCoordinate[] = [];
+    let i: number;
+    let maxSqDist: number;
+    let sqDist: number;
+    let index: number | undefined;
 
     markers[first] = markers[last] = 1;
 
@@ -360,11 +595,12 @@ export function simplifyCoordinates(
         }
       }
 
-      if (maxSqDist > sqTolerance) {
-        markers[index!] = 1;
-        stack.push(first, index!, index!, last);
+      if (maxSqDist > sqTolerance && index !== undefined) {
+        markers[index] = 1;
+        stack.push(first, index, index, last);
       }
 
+      if (stack.length === 0) break;
       last = stack.pop()!;
       first = stack.pop()!;
     }
@@ -378,27 +614,113 @@ export function simplifyCoordinates(
     return newPoints;
   }
 
-  const sqTolerance = tolerance * tolerance;
-  return simplifyDouglasPeucker(coordinates, sqTolerance);
+  return simplifyDouglasPeucker(coordinates, tolerance * tolerance);
+}
+
+// ============================================================================
+// VALIDATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Validate latitude value
+ */
+export function isValidLatitude(lat: number): boolean {
+  return typeof lat === 'number' && !isNaN(lat) && lat >= -90 && lat <= 90;
 }
 
 /**
- * Check if point is inside polygon
+ * Validate longitude value
  */
-export function isPointInPolygon(point: MapCenter, polygon: MapCenter[]): boolean {
-  let inside = false;
-  
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i].lng;
-    const yi = polygon[i].lat;
-    const xj = polygon[j].lng;
-    const yj = polygon[j].lat;
-    
-    const intersect = ((yi > point.lat) !== (yj > point.lat)) &&
-      (point.lng < (xj - xi) * (point.lat - yi) / (yj - yi) + xi);
-    
-    if (intersect) inside = !inside;
-  }
-  
-  return inside;
+export function isValidLongitude(lng: number): boolean {
+  return typeof lng === 'number' && !isNaN(lng) && lng >= -180 && lng <= 180;
 }
+
+/**
+ * Validate coordinate pair
+ */
+export function isValidCoordinate(lat: number, lng: number): boolean {
+  return isValidLatitude(lat) && isValidLongitude(lng);
+}
+
+/**
+ * Validate MapCenter object
+ */
+export function isValidMapCenter(center: MapCenter): boolean {
+  return (
+    center !== null &&
+    typeof center === 'object' &&
+    'lat' in center &&
+    'lng' in center &&
+    isValidCoordinate(center.lat, center.lng)
+  );
+}
+
+/**
+ * Validate GeoJSON coordinate
+ */
+export function isValidGeoJsonCoordinate(coord: any): coord is GeoJSONCoordinate {
+  return (
+    Array.isArray(coord) &&
+    coord.length === 2 &&
+    isValidLongitude(coord[0]) &&
+    isValidLatitude(coord[1])
+  );
+}
+
+// ============================================================================
+// EXPORT
+// ============================================================================
+
+export default {
+  // Conversion
+  geoJsonToLeaflet,
+  leafletToGeoJson,
+  geoJsonToMapCenter,
+  mapCenterToGeoJson,
+  mapCenterToLeaflet,
+  leafletToMapCenter,
+  
+  // Geofencing
+  isWithinBounds,
+  isGeoJsonWithinBounds,
+  isWithinGeofence,
+  isPointInPolygon,
+  boundsIntersectGeofence,
+  
+  // Distance
+  calculateDistance,
+  calculateDistanceGeoJson,
+  calculateBearing,
+  getCompassDirection,
+  
+  // Bounds
+  calculateBoundsFromRadius,
+  calculateCenterFromBounds,
+  calculateBoundsFromPoints,
+  calculateBoundsFromGeoJson,
+  extendBounds,
+  isValidBounds,
+  
+  // Geography
+  geographyToCoordinates,
+  extractPointFromGeography,
+  extractLineFromGeography,
+  extractAllPointsFromGeography,
+  getBoundsFromGeography,
+  
+  // Formatting
+  formatCoordinates,
+  formatMapCenter,
+  formatDistance,
+  
+  // Map utilities
+  calculateZoomLevel,
+  simplifyCoordinates,
+  
+  // Validation
+  isValidLatitude,
+  isValidLongitude,
+  isValidCoordinate,
+  isValidMapCenter,
+  isValidGeoJsonCoordinate,
+};
