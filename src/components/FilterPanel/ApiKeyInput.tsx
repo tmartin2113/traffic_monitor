@@ -17,7 +17,8 @@ import {
   Copy,
   Trash2,
   Info,
-  Shield
+  CheckCircle2,
+  XCircle
 } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -46,17 +47,27 @@ export interface ApiKeyInputProps {
 type ValidationState = 'idle' | 'validating' | 'valid' | 'invalid';
 
 /**
+ * Error types for better user feedback
+ */
+interface ValidationError {
+  type: 'format' | 'api' | 'network' | 'rate-limit' | 'unknown';
+  message: string;
+  suggestion?: string;
+}
+
+/**
  * ApiKeyInput Component
  * 
  * Production-ready API key management with:
  * - Secure key input with show/hide toggle
- * - Real-time validation
+ * - Real-time validation with detailed error messages
  * - Key storage in localStorage
  * - Copy to clipboard functionality
  * - Clear/remove key option
  * - Visual feedback for all states
  * - Help text and external links
- * - Accessibility features
+ * - Accessibility features (ARIA labels, keyboard navigation)
+ * - Rate limit awareness
  */
 export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
   onKeyValidated,
@@ -65,12 +76,18 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
   compact = false,
   autoFocus = false,
 }) => {
+  // State
   const [inputValue, setInputValue] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [validationState, setValidationState] = useState<ValidationState>('idle');
-  const [showSuccess, setShowSuccess] = useState(false);
+  const [validationError, setValidationError] = useState<ValidationError | null>(null);
+  const [showSuccessBanner, setShowSuccessBanner] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  
+  // Refs
   const inputRef = useRef<HTMLInputElement>(null);
+  const validationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Use the API key manager hook
   const {
@@ -78,9 +95,9 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
     setApiKey,
     removeApiKey,
     isValidApiKey,
-    isValidating,
+    isValidating: hookIsValidating,
     validateApiKey,
-    error,
+    error: hookError,
   } = useApiKeyManager();
 
   // Initialize input with stored key
@@ -98,69 +115,181 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
     }
   }, [autoFocus, apiKey]);
 
-  // Update validation state based on hook state
+  // Sync hook validation state
   useEffect(() => {
-    if (isValidating) {
+    if (hookIsValidating) {
       setValidationState('validating');
-    } else if (isValidApiKey) {
-      setValidationState('valid');
-    } else if (error) {
-      setValidationState('invalid');
     }
-  }, [isValidating, isValidApiKey, error]);
+  }, [hookIsValidating]);
 
-  // Handle input change
+  /**
+   * Parse validation error into user-friendly format
+   */
+  const parseValidationError = useCallback((error: any): ValidationError => {
+    // Network errors
+    if (error?.code === 'ENOTFOUND' || error?.code === 'ECONNREFUSED') {
+      return {
+        type: 'network',
+        message: 'Cannot reach 511.org API',
+        suggestion: 'Check your internet connection and try again.'
+      };
+    }
+
+    // API authentication errors
+    if (error?.statusCode === 401 || error?.code === 'UNAUTHORIZED') {
+      return {
+        type: 'api',
+        message: 'Invalid API key',
+        suggestion: 'Please check your key or request a new one from 511.org.'
+      };
+    }
+
+    // Rate limit errors
+    if (error?.statusCode === 429 || error?.code === 'RATE_LIMITED') {
+      return {
+        type: 'rate-limit',
+        message: 'Rate limit reached',
+        suggestion: 'Your API key is valid but has hit the rate limit. Try again in an hour.'
+      };
+    }
+
+    // Format errors
+    if (error?.message?.includes('format')) {
+      return {
+        type: 'format',
+        message: 'Invalid key format',
+        suggestion: 'API keys are typically 20-64 characters long and may contain letters, numbers, hyphens, and underscores.'
+      };
+    }
+
+    // Generic errors
+    return {
+      type: 'unknown',
+      message: error?.message || 'Failed to validate API key',
+      suggestion: 'Please try again. If the problem persists, contact support.'
+    };
+  }, []);
+
+  /**
+   * Validate key format before API call
+   */
+  const isValidKeyFormat = useCallback((key: string): boolean => {
+    if (!key || typeof key !== 'string') {
+      return false;
+    }
+    
+    const trimmedKey = key.trim();
+    
+    // Check length (511.org keys are typically 30-50 characters)
+    if (trimmedKey.length < 20 || trimmedKey.length > 64) {
+      return false;
+    }
+    
+    // Check for valid characters (alphanumeric, hyphens, underscores)
+    const keyPattern = /^[a-zA-Z0-9_-]+$/;
+    return keyPattern.test(trimmedKey);
+  }, []);
+
+  /**
+   * Handle input change with basic format validation
+   */
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value.trim();
     setInputValue(value);
     setValidationState('idle');
-    setShowSuccess(false);
+    setValidationError(null);
+    setShowSuccessBanner(false);
+    
+    // Clear any pending validation
+    if (validationTimeoutRef.current) {
+      clearTimeout(validationTimeoutRef.current);
+    }
   }, []);
 
-  // Handle paste
+  /**
+   * Handle paste with cleanup
+   */
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLInputElement>) => {
     e.preventDefault();
     const pastedText = e.clipboardData.getData('text').trim();
     setInputValue(pastedText);
     setValidationState('idle');
+    setValidationError(null);
   }, []);
 
-  // Handle key validation
+  /**
+   * Handle key validation
+   */
   const handleValidate = useCallback(async () => {
-    if (!inputValue || inputValue.length < 10) {
+    const trimmedKey = inputValue.trim();
+    
+    // Clear previous errors
+    setValidationError(null);
+
+    // Check if empty
+    if (!trimmedKey) {
+      setValidationError({
+        type: 'format',
+        message: 'API key is required',
+        suggestion: 'Please enter your 511.org API key.'
+      });
       setValidationState('invalid');
       return;
     }
 
+    // Check format first
+    if (!isValidKeyFormat(trimmedKey)) {
+      setValidationError({
+        type: 'format',
+        message: 'Invalid API key format',
+        suggestion: 'API keys should be 20-64 characters and contain only letters, numbers, hyphens, and underscores.'
+      });
+      setValidationState('invalid');
+      return;
+    }
+
+    // Validate with API
     setValidationState('validating');
 
     try {
-      const isValid = await validateApiKey(inputValue);
+      const isValid = await validateApiKey(trimmedKey);
       
       if (isValid) {
-        setApiKey(inputValue);
+        // Success
+        setApiKey(trimmedKey);
         setValidationState('valid');
-        setShowSuccess(true);
-        onKeyValidated?.(inputValue);
+        setShowSuccessBanner(true);
+        onKeyValidated?.(trimmedKey);
 
-        // Hide success message after 3 seconds
+        // Hide success banner after 3 seconds
         setTimeout(() => {
-          setShowSuccess(false);
+          setShowSuccessBanner(false);
         }, 3000);
       } else {
+        // Validation returned false
+        const error = parseValidationError(hookError);
+        setValidationError(error);
         setValidationState('invalid');
       }
-    } catch (err) {
+    } catch (err: any) {
+      // Exception during validation
+      const error = parseValidationError(err);
+      setValidationError(error);
       setValidationState('invalid');
+      
+      console.error('API key validation error:', err);
     }
-  }, [inputValue, validateApiKey, setApiKey, onKeyValidated]);
+  }, [inputValue, isValidKeyFormat, validateApiKey, setApiKey, onKeyValidated, hookError, parseValidationError]);
 
-  // Handle remove key
+  /**
+   * Handle remove key
+   */
   const handleRemoveKey = useCallback(() => {
     removeApiKey();
     setInputValue('');
     setValidationState('idle');
-    setShowSuccess(false);
+    setValidationError(null);
+    setShowSuccessBanner(false);
     onKeyRemoved?.();
     
     // Focus input after removal
@@ -169,12 +298,16 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
     }, 100);
   }, [removeApiKey, onKeyRemoved]);
 
-  // Handle toggle visibility
+  /**
+   * Handle toggle visibility
+   */
   const handleToggleVisibility = useCallback(() => {
-    setShowKey(!showKey);
-  }, [showKey]);
+    setShowKey(prev => !prev);
+  }, []);
 
-  // Handle copy to clipboard
+  /**
+   * Handle copy to clipboard
+   */
   const handleCopy = useCallback(async () => {
     if (!apiKey) return;
 
@@ -186,10 +319,29 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
       }, 2000);
     } catch (err) {
       console.error('Failed to copy API key:', err);
+      // Fallback for older browsers
+      try {
+        const textArea = document.createElement('textarea');
+        textArea.value = apiKey;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        setCopySuccess(true);
+        setTimeout(() => {
+          setCopySuccess(false);
+        }, 2000);
+      } catch (fallbackErr) {
+        console.error('Fallback copy also failed:', fallbackErr);
+      }
     }
   }, [apiKey]);
 
-  // Handle Enter key press
+  /**
+   * Handle Enter key press
+   */
   const handleKeyPress = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -197,29 +349,49 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
     }
   }, [handleValidate]);
 
-  // Open 511.org token page
+  /**
+   * Open 511.org token page
+   */
   const handleGetKey = useCallback(() => {
     window.open('https://511.org/open-data/token', '_blank', 'noopener,noreferrer');
   }, []);
 
-  // Determine input border color based on state
+  /**
+   * Determine input border color based on state
+   */
   const getBorderColor = () => {
     switch (validationState) {
       case 'valid':
-        return 'border-green-500 focus:ring-green-500';
+        return 'border-green-500 focus:ring-green-500 focus:border-green-500';
       case 'invalid':
-        return 'border-red-500 focus:ring-red-500';
+        return 'border-red-500 focus:ring-red-500 focus:border-red-500';
       case 'validating':
-        return 'border-blue-500 focus:ring-blue-500';
+        return 'border-blue-500 focus:ring-blue-500 focus:border-blue-500';
       default:
-        return 'border-gray-300 focus:ring-blue-500';
+        return 'border-gray-300 focus:ring-blue-500 focus:border-blue-500';
+    }
+  };
+
+  /**
+   * Get status icon
+   */
+  const getStatusIcon = () => {
+    switch (validationState) {
+      case 'validating':
+        return <Loader2 className="w-5 h-5 text-blue-600 animate-spin" />;
+      case 'valid':
+        return <CheckCircle2 className="w-5 h-5 text-green-600" />;
+      case 'invalid':
+        return <XCircle className="w-5 h-5 text-red-600" />;
+      default:
+        return null;
     }
   };
 
   // If key is valid and not in compact mode, show success state
-  if (validationState === 'valid' && !compact && !showSuccess) {
+  if (validationState === 'valid' && !compact && !showSuccessBanner) {
     return (
-      <div className={clsx('bg-white rounded-lg border border-green-200', className)}>
+      <div className={clsx('bg-white rounded-lg border border-green-200 shadow-sm', className)}>
         <div className="p-4">
           {/* Success Header */}
           <div className="flex items-start gap-3">
@@ -230,22 +402,156 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
               <h3 className="text-sm font-semibold text-gray-900 mb-1">
                 API Key Connected
               </h3>
-              <p className="text-sm text-gray-600">
+              <p className="text-sm text-gray-600 mb-3">
                 Your 511.org API key is validated and active.
+              </p>
+
+              {/* Masked Key Display */}
+              <div className="bg-gray-50 rounded-md p-3 mb-3 font-mono text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-700 truncate">
+                    {showKey ? apiKey : `${'•'.repeat(Math.min(apiKey?.length || 0, 32))}...`}
+                  </span>
+                  <div className="flex items-center gap-2 ml-2">
+                    <button
+                      type="button"
+                      onClick={handleToggleVisibility}
+                      className="p-1 hover:bg-gray-200 rounded transition-colors"
+                      aria-label={showKey ? 'Hide API key' : 'Show API key'}
+                    >
+                      {showKey ? (
+                        <EyeOff className="w-4 h-4 text-gray-600" />
+                      ) : (
+                        <Eye className="w-4 h-4 text-gray-600" />
+                      )}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCopy}
+                      className="p-1 hover:bg-gray-200 rounded transition-colors relative"
+                      aria-label="Copy API key"
+                    >
+                      {copySuccess ? (
+                        <Check className="w-4 h-4 text-green-600" />
+                      ) : (
+                        <Copy className="w-4 h-4 text-gray-600" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleRemoveKey}
+                  className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-red-700 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Remove Key
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Main input form
+  return (
+    <div className={clsx('bg-white rounded-lg border border-gray-200 shadow-sm', className)}>
+      <div className="p-4">
+        {/* Header */}
+        <div className="flex items-start justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className="flex-shrink-0 w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+              <Key className="w-4 h-4 text-blue-600" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-gray-900">
+                511.org API Key
+              </h3>
+              <p className="text-xs text-gray-500">
+                Required for accessing traffic data
               </p>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowHelp(prev => !prev)}
+            className="p-1 hover:bg-gray-100 rounded transition-colors"
+            aria-label="Toggle help"
+          >
+            <Info className="w-4 h-4 text-gray-400" />
+          </button>
+        </div>
 
-          {/* Key Display */}
-          <div className="mt-4 bg-gray-50 rounded-lg p-3 border border-gray-200">
+        {/* Help Text */}
+        {showHelp && (
+          <div className="mb-3 p-3 bg-blue-50 rounded-md border border-blue-200">
+            <p className="text-sm text-blue-900 mb-2">
+              Don't have an API key? Get one for free from 511.org:
+            </p>
+            <button
+              type="button"
+              onClick={handleGetKey}
+              className="inline-flex items-center gap-1 text-sm font-medium text-blue-700 hover:text-blue-800 hover:underline"
+            >
+              Request API Key
+              <ExternalLink className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Success Banner */}
+        {showSuccessBanner && (
+          <div className="mb-3 p-3 bg-green-50 rounded-md border border-green-200 animate-fade-in">
             <div className="flex items-center gap-2">
-              <Key className="w-4 h-4 text-gray-400 flex-shrink-0" />
-              <code className="flex-1 text-xs font-mono text-gray-700 truncate">
-                {showKey ? apiKey : apiKey?.replace(/./g, '•')}
-              </code>
+              <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
+              <p className="text-sm font-medium text-green-900">
+                API key validated successfully!
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Input Field */}
+        <div className="relative mb-3">
+          <input
+            ref={inputRef}
+            type={showKey ? 'text' : 'password'}
+            value={inputValue}
+            onChange={handleInputChange}
+            onKeyPress={handleKeyPress}
+            onPaste={handlePaste}
+            placeholder="Enter your 511.org API key"
+            disabled={validationState === 'validating'}
+            className={clsx(
+              'w-full px-3 py-2 pr-24 text-sm rounded-md border transition-colors',
+              'focus:outline-none focus:ring-2',
+              'disabled:bg-gray-50 disabled:cursor-not-allowed',
+              'font-mono',
+              getBorderColor()
+            )}
+            aria-label="API key input"
+            aria-invalid={validationState === 'invalid'}
+            aria-describedby={validationError ? 'api-key-error' : undefined}
+          />
+          
+          {/* Input Actions */}
+          <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {/* Status Icon */}
+            {getStatusIcon()}
+            
+            {/* Toggle Visibility */}
+            {inputValue && (
               <button
+                type="button"
                 onClick={handleToggleVisibility}
-                className="p-1 rounded hover:bg-gray-200 transition-colors"
+                disabled={validationState === 'validating'}
+                className="p-1 hover:bg-gray-100 rounded transition-colors disabled:opacity-50"
                 aria-label={showKey ? 'Hide API key' : 'Show API key'}
               >
                 {showKey ? (
@@ -254,188 +560,93 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
                   <Eye className="w-4 h-4 text-gray-600" />
                 )}
               </button>
-              <button
-                onClick={handleCopy}
-                className="p-1 rounded hover:bg-gray-200 transition-colors"
-                aria-label="Copy API key"
-              >
-                {copySuccess ? (
-                  <Check className="w-4 h-4 text-green-600" />
-                ) : (
-                  <Copy className="w-4 h-4 text-gray-600" />
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div className="mt-4 flex gap-2">
-            <button
-              onClick={handleRemoveKey}
-              className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-red-700 bg-red-50 rounded-lg hover:bg-red-100 transition-colors"
-            >
-              <Trash2 className="w-4 h-4" />
-              Remove Key
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className={clsx('bg-white rounded-lg border border-gray-200', className)}>
-      <div className={clsx(compact ? 'p-3' : 'p-4')}>
-        {/* Header */}
-        {!compact && (
-          <div className="mb-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Shield className="w-5 h-5 text-blue-600" />
-              <h3 className="text-sm font-semibold text-gray-900">
-                511.org API Key
-              </h3>
-            </div>
-            <p className="text-sm text-gray-600">
-              Enter your API key to access real-time traffic data.
-            </p>
-          </div>
-        )}
-
-        {/* Input Field */}
-        <div className="space-y-3">
-          <div className="relative">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <Key className="w-4 h-4 text-gray-400" />
-            </div>
-            <input
-              ref={inputRef}
-              type={showKey ? 'text' : 'password'}
-              value={inputValue}
-              onChange={handleInputChange}
-              onPaste={handlePaste}
-              onKeyPress={handleKeyPress}
-              placeholder="Enter your API key..."
-              disabled={validationState === 'validating'}
-              className={clsx(
-                'w-full pl-10 pr-24 py-2.5 text-sm font-mono rounded-lg transition-colors',
-                'focus:outline-none focus:ring-2 focus:ring-offset-0',
-                'disabled:bg-gray-50 disabled:cursor-not-allowed',
-                getBorderColor()
-              )}
-              aria-label="API key input"
-              aria-describedby="api-key-help"
-            />
+            )}
             
-            {/* Input Actions */}
-            <div className="absolute inset-y-0 right-0 flex items-center gap-1 pr-2">
-              {inputValue && (
-                <button
-                  onClick={() => setInputValue('')}
-                  className="p-1 rounded hover:bg-gray-100 transition-colors"
-                  aria-label="Clear input"
-                  disabled={validationState === 'validating'}
-                >
-                  <X className="w-4 h-4 text-gray-400" />
-                </button>
-              )}
+            {/* Clear Input */}
+            {inputValue && validationState !== 'validating' && (
               <button
-                onClick={handleToggleVisibility}
-                className="p-1 rounded hover:bg-gray-100 transition-colors"
-                aria-label={showKey ? 'Hide API key' : 'Show API key'}
-                disabled={validationState === 'validating'}
+                type="button"
+                onClick={() => {
+                  setInputValue('');
+                  setValidationState('idle');
+                  setValidationError(null);
+                  inputRef.current?.focus();
+                }}
+                className="p-1 hover:bg-gray-100 rounded transition-colors"
+                aria-label="Clear input"
               >
-                {showKey ? (
-                  <EyeOff className="w-4 h-4 text-gray-400" />
-                ) : (
-                  <Eye className="w-4 h-4 text-gray-400" />
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Validation Status */}
-          {validationState === 'validating' && (
-            <div className="flex items-center gap-2 text-sm text-blue-600">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <span>Validating API key...</span>
-            </div>
-          )}
-
-          {validationState === 'valid' && showSuccess && (
-            <div className="flex items-center gap-2 text-sm text-green-600">
-              <Check className="w-4 h-4" />
-              <span>API key validated successfully!</span>
-            </div>
-          )}
-
-          {validationState === 'invalid' && error && (
-            <div className="flex items-start gap-2 text-sm text-red-600">
-              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>{error}</span>
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={handleValidate}
-              disabled={!inputValue || validationState === 'validating'}
-              className={clsx(
-                'flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-colors',
-                'disabled:opacity-50 disabled:cursor-not-allowed',
-                'bg-blue-600 text-white hover:bg-blue-700',
-                'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2'
-              )}
-            >
-              {validationState === 'validating' ? (
-                <>
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  Validating...
-                </>
-              ) : (
-                <>
-                  <Check className="w-4 h-4" />
-                  Validate Key
-                </>
-              )}
-            </button>
-
-            {apiKey && (
-              <button
-                onClick={handleRemoveKey}
-                disabled={validationState === 'validating'}
-                className={clsx(
-                  'flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium text-sm transition-colors',
-                  'border border-gray-300 text-gray-700 hover:bg-gray-50',
-                  'focus:outline-none focus:ring-2 focus:ring-gray-500 focus:ring-offset-2',
-                  'disabled:opacity-50 disabled:cursor-not-allowed'
-                )}
-              >
-                <Trash2 className="w-4 h-4" />
-                Remove
+                <X className="w-4 h-4 text-gray-600" />
               </button>
             )}
           </div>
         </div>
 
-        {/* Help Section */}
-        {!compact && (
-          <div className="mt-4 pt-4 border-t border-gray-200">
-            <div className="flex items-start gap-2 text-sm text-gray-600 mb-3">
-              <Info className="w-4 h-4 text-gray-400 flex-shrink-0 mt-0.5" />
-              <p id="api-key-help">
-                Your API key is stored securely in your browser and never shared with third parties.
-              </p>
+        {/* Error Message */}
+        {validationError && (
+          <div
+            id="api-key-error"
+            className="mb-3 p-3 bg-red-50 rounded-md border border-red-200"
+            role="alert"
+          >
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-red-900 mb-1">
+                  {validationError.message}
+                </p>
+                {validationError.suggestion && (
+                  <p className="text-sm text-red-700">
+                    {validationError.suggestion}
+                  </p>
+                )}
+              </div>
             </div>
-
-            <button
-              onClick={handleGetKey}
-              className="flex items-center gap-2 text-sm font-medium text-blue-600 hover:text-blue-700"
-            >
-              <ExternalLink className="w-4 h-4" />
-              Get a free API key from 511.org
-            </button>
           </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleValidate}
+            disabled={!inputValue.trim() || validationState === 'validating'}
+            className={clsx(
+              'flex-1 inline-flex items-center justify-center gap-2 px-4 py-2',
+              'text-sm font-medium text-white rounded-md',
+              'transition-colors',
+              'disabled:opacity-50 disabled:cursor-not-allowed',
+              validationState === 'validating'
+                ? 'bg-blue-400 cursor-wait'
+                : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
+            )}
+          >
+            {validationState === 'validating' ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Validating...
+              </>
+            ) : (
+              <>
+                <Check className="w-4 h-4" />
+                Validate Key
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleGetKey}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors"
+          >
+            Get Key
+          </button>
+        </div>
+
+        {/* Footer Help Text */}
+        {!showHelp && (
+          <p className="mt-3 text-xs text-gray-500 text-center">
+            Your API key is stored locally and never sent to third parties
+          </p>
         )}
       </div>
     </div>
