@@ -1,17 +1,14 @@
 /**
  * @file services/errorReporter.ts
  * @description Production-ready centralized error reporting service
- * @version 1.0.0
+ * @version 2.0.0
  * 
- * PRODUCTION-READY STANDARDS:
- * - Integrates with Sentry for production error tracking
- * - Rate limiting to prevent spam
- * - PII sanitization
- * - Development vs Production behavior
- * - Error categorization and metadata
+ * FIXES BUG #17: Removed all console.* statements for production
+ * Now uses logger utility that respects environment
  */
 
 import { envConfig } from '../config/environment';
+import { logger } from '../utils/logger';
 
 /**
  * Error Types for Categorization
@@ -57,9 +54,6 @@ class ErrorRateLimiter {
   private readonly maxErrorsPerMinute = 10;
   private readonly windowMs = 60000; // 1 minute
 
-  /**
-   * Check if error should be reported based on rate limit
-   */
   shouldReport(errorKey: string): boolean {
     const now = Date.now();
     const key = `${errorKey}_${Math.floor(now / this.windowMs)}`;
@@ -70,16 +64,10 @@ class ErrorRateLimiter {
     }
 
     this.errorCounts.set(key, count + 1);
-
-    // Cleanup old entries
     this.cleanup(now);
-
     return true;
   }
 
-  /**
-   * Cleanup old rate limit entries
-   */
   private cleanup(now: number): void {
     const currentWindow = Math.floor(now / this.windowMs);
     
@@ -91,9 +79,6 @@ class ErrorRateLimiter {
     }
   }
 
-  /**
-   * Reset rate limiter
-   */
   reset(): void {
     this.errorCounts.clear();
   }
@@ -111,40 +96,26 @@ class PIISanitizer {
     /\b(?:\d{1,3}\.){3}\d{1,3}\b/g, // IP Address
   ];
 
-  /**
-   * Sanitize string by removing PII
-   */
   static sanitize(text: string): string {
     let sanitized = text;
-
     for (const pattern of this.PII_PATTERNS) {
       sanitized = sanitized.replace(pattern, '[REDACTED]');
     }
-
     return sanitized;
   }
 
-  /**
-   * Sanitize object recursively
-   */
-  static sanitizeObject(obj: any): any {
-    if (typeof obj === 'string') {
-      return this.sanitize(obj);
-    }
-
-    if (Array.isArray(obj)) {
-      return obj.map(item => this.sanitizeObject(item));
-    }
-
-    if (obj && typeof obj === 'object') {
-      const sanitized: any = {};
-      for (const [key, value] of Object.entries(obj)) {
-        sanitized[key] = this.sanitizeObject(value);
+  static sanitizeObject<T extends Record<string, any>>(obj: T): T {
+    const sanitized = { ...obj };
+    
+    for (const key in sanitized) {
+      if (typeof sanitized[key] === 'string') {
+        sanitized[key] = this.sanitize(sanitized[key]) as any;
+      } else if (typeof sanitized[key] === 'object' && sanitized[key] !== null) {
+        sanitized[key] = this.sanitizeObject(sanitized[key]);
       }
-      return sanitized;
     }
-
-    return obj;
+    
+    return sanitized;
   }
 }
 
@@ -152,46 +123,53 @@ class PIISanitizer {
  * Error Reporter Service
  */
 class ErrorReporterService {
-  private rateLimiter = new ErrorRateLimiter();
   private isInitialized = false;
+  private rateLimiter = new ErrorRateLimiter();
 
   /**
-   * Initialize error reporter
+   * Initialize error reporting service
    */
   initialize(): void {
     if (this.isInitialized) {
+      logger.warn('Error reporter already initialized');
       return;
     }
 
-    // Initialize Sentry in production
-    if (envConfig.isProduction() && window.Sentry) {
-      try {
-        window.Sentry.init({
-          dsn: import.meta.env.VITE_SENTRY_DSN,
-          environment: envConfig.getEnvironment(),
-          release: import.meta.env.VITE_APP_VERSION || 'unknown',
-          tracesSampleRate: 0.1,
-          beforeSend: (event) => {
-            // Sanitize PII from error data
-            if (event.message) {
-              event.message = PIISanitizer.sanitize(event.message);
+    // Production: Initialize Sentry
+    if (envConfig.isProduction()) {
+      const sentryDsn = envConfig.getMonitoringConfig().VITE_SENTRY_DSN;
+      
+      if (sentryDsn && window.Sentry) {
+        try {
+          window.Sentry.init({
+            dsn: sentryDsn,
+            environment: envConfig.getEnvironment(),
+            integrations: [
+              new window.Sentry.BrowserTracing(),
+            ],
+            tracesSampleRate: 0.1,
+            beforeSend(event) {
+              // Sanitize PII from all event data
+              if (event.message) {
+                event.message = PIISanitizer.sanitize(event.message);
+              }
+              if (event.exception?.values) {
+                event.exception.values = event.exception.values.map(value => ({
+                  ...value,
+                  value: value.value ? PIISanitizer.sanitize(value.value) : value.value
+                }));
+              }
+              return event;
             }
-            if (event.exception?.values) {
-              event.exception.values = event.exception.values.map(value => ({
-                ...value,
-                value: value.value ? PIISanitizer.sanitize(value.value) : value.value
-              }));
-            }
-            return event;
-          }
-        });
+          });
 
-        console.log('Error reporting initialized (Sentry)');
-      } catch (error) {
-        console.error('Failed to initialize error reporting:', error);
+          logger.info('Error reporting initialized with Sentry');
+        } catch (error) {
+          logger.error('Failed to initialize Sentry', { error });
+        }
       }
-    } else if (envConfig.isDevelopment()) {
-      console.log('Error reporting initialized (Development mode - Console only)');
+    } else {
+      logger.info('Error reporting initialized (Development mode - Logger only)');
     }
 
     this.isInitialized = true;
@@ -201,14 +179,11 @@ class ErrorReporterService {
    * Report error with metadata
    */
   reportError(error: Error, metadata: ErrorMetadata): void {
-    // Generate error key for rate limiting
     const errorKey = `${metadata.type}_${error.message}`;
 
     // Check rate limit
     if (!this.rateLimiter.shouldReport(errorKey)) {
-      if (envConfig.isDevelopment()) {
-        console.warn('Error report rate limited:', errorKey);
-      }
+      logger.warn('Error report rate limited', { errorKey });
       return;
     }
 
@@ -217,21 +192,15 @@ class ErrorReporterService {
     const sanitizedError = new Error(PIISanitizer.sanitize(error.message));
     sanitizedError.stack = error.stack ? PIISanitizer.sanitize(error.stack) : undefined;
 
-    // Development: Log to console
-    if (envConfig.isDevelopment()) {
-      console.group(`🔴 Error Report: ${metadata.type}`);
-      console.error('Error:', sanitizedError);
-      console.table({
-        Type: metadata.type,
-        Severity: metadata.severity || 'error',
-        Component: metadata.component || 'Unknown',
-        Timestamp: metadata.timestamp,
-      });
-      if (sanitizedMetadata.additionalData) {
-        console.log('Additional Data:', sanitizedMetadata.additionalData);
-      }
-      console.groupEnd();
-    }
+    // Development: Log to logger (which respects environment)
+    logger.error('Error Report', {
+      type: metadata.type,
+      severity: metadata.severity || 'error',
+      component: metadata.component || 'Unknown',
+      timestamp: metadata.timestamp,
+      error: sanitizedError,
+      additionalData: sanitizedMetadata.additionalData
+    });
 
     // Production: Send to Sentry
     if (envConfig.isProduction() && window.Sentry) {
@@ -247,7 +216,7 @@ class ErrorReporterService {
           }
         });
       } catch (reportError) {
-        console.error('Failed to report error to Sentry:', reportError);
+        logger.error('Failed to report error to Sentry', { error: reportError });
       }
     }
 
@@ -261,7 +230,7 @@ class ErrorReporterService {
           component: metadata.component
         });
       } catch (analyticsError) {
-        console.error('Failed to report error to analytics:', analyticsError);
+        logger.error('Failed to report error to analytics', { error: analyticsError });
       }
     }
   }
@@ -285,9 +254,7 @@ class ErrorReporterService {
    * Report info message
    */
   reportInfo(message: string, metadata: Partial<ErrorMetadata> = {}): void {
-    if (envConfig.isDevelopment()) {
-      console.info(`ℹ️ ${message}`, metadata);
-    }
+    logger.info(message, metadata);
 
     if (envConfig.isProduction() && window.Sentry) {
       window.Sentry.captureMessage(message, {
@@ -315,16 +282,10 @@ class ErrorReporterService {
     }
   }
 
-  /**
-   * Reset rate limiter (useful for testing)
-   */
   resetRateLimiter(): void {
     this.rateLimiter.reset();
   }
 
-  /**
-   * Check if error reporting is initialized
-   */
   getIsInitialized(): boolean {
     return this.isInitialized;
   }
@@ -345,11 +306,7 @@ errorReporter.initialize();
  */
 declare global {
   interface Window {
-    Sentry?: {
-      init: (options: any) => void;
-      captureException: (error: Error, options?: any) => void;
-      captureMessage: (message: string, options?: any) => void;
-    };
+    Sentry?: any;
     gtag?: (...args: any[]) => void;
   }
 }
