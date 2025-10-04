@@ -1,27 +1,48 @@
 /**
  * @file vite.config.ts
- * @description Production-ready Vite configuration with enhanced development server
- * @version 2.0.0
+ * @description Production-ready Vite configuration
+ * @version 3.0.0
  * 
- * PRODUCTION-READY STANDARDS:
- * - Port conflict handling
- * - Optimized build configuration
- * - PWA support
- * - Legacy browser support
- * - Source maps and chunking
+ * FIXES BUG #17: Added console removal plugin for production builds
  */
 
-import { defineConfig, loadEnv } from 'vite';
+import { defineConfig, loadEnv, Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import legacy from '@vitejs/plugin-legacy';
 import path from 'path';
 
+/**
+ * Custom plugin to remove console statements in production
+ * More aggressive than esbuild's drop feature
+ */
+function removeConsolePlugin(): Plugin {
+  return {
+    name: 'remove-console',
+    apply: 'build',
+    enforce: 'pre',
+    transform(code, id) {
+      // Skip node_modules and test files
+      if (id.includes('node_modules') || id.includes('.test.') || id.includes('.spec.')) {
+        return null;
+      }
+
+      // Remove all console.* except console.error
+      const transformed = code
+        .replace(/console\.(log|debug|info|warn|table|trace|group|groupEnd|groupCollapsed|time|timeEnd|assert|count|countReset|dir|dirxml|profile|profileEnd|clear)\s*\([^)]*\);?/g, '')
+        .replace(/console\.(log|debug|info|warn|table|trace|group|groupEnd|groupCollapsed|time|timeEnd|assert|count|countReset|dir|dirxml|profile|profileEnd|clear)\s*\([^)]*\)/g, 'void 0');
+      
+      return {
+        code: transformed,
+        map: null
+      };
+    }
+  };
+}
+
 export default defineConfig(({ mode }) => {
-  // Load env file based on mode
   const env = loadEnv(mode, process.cwd(), '');
   
-  // Parse environment variables with defaults
   const devServerPort = parseInt(env.VITE_DEV_SERVER_PORT || '3000', 10);
   const devServerHost = env.VITE_DEV_SERVER_HOST || 'localhost';
   const devServerOpen = env.VITE_DEV_SERVER_OPEN === 'true';
@@ -29,9 +50,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       react({
-        // Fast refresh for better DX
         fastRefresh: true,
-        // Babel plugins for optimization
         babel: {
           plugins: [
             ['@babel/plugin-transform-runtime', { useESModules: true }]
@@ -39,7 +58,6 @@ export default defineConfig(({ mode }) => {
         }
       }),
       
-      // Legacy browser support
       legacy({
         targets: ['defaults', 'not IE 11'],
         additionalLegacyPolyfills: ['regenerator-runtime/runtime'],
@@ -47,7 +65,6 @@ export default defineConfig(({ mode }) => {
         polyfills: true
       }),
       
-      // PWA configuration
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: ['favicon.ico', 'robots.txt', 'apple-touch-icon.png'],
@@ -80,7 +97,7 @@ export default defineConfig(({ mode }) => {
                 networkTimeoutSeconds: 10,
                 expiration: {
                   maxEntries: 50,
-                  maxAgeSeconds: 5 * 60 // 5 minutes
+                  maxAgeSeconds: 5 * 60
                 },
                 cacheableResponse: {
                   statuses: [0, 200]
@@ -94,7 +111,7 @@ export default defineConfig(({ mode }) => {
                 cacheName: 'map-tiles-cache',
                 expiration: {
                   maxEntries: 500,
-                  maxAgeSeconds: 30 * 24 * 60 * 60 // 30 days
+                  maxAgeSeconds: 30 * 24 * 60 * 60
                 },
                 cacheableResponse: {
                   statuses: [0, 200]
@@ -110,10 +127,12 @@ export default defineConfig(({ mode }) => {
           enabled: mode === 'development',
           type: 'module'
         }
-      })
+      }),
+
+      // BUG FIX #17: Remove console statements in production
+      ...(mode === 'production' ? [removeConsolePlugin()] : []),
     ],
     
-    // Path resolution
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
@@ -124,25 +143,17 @@ export default defineConfig(({ mode }) => {
         '@types': path.resolve(__dirname, './src/types'),
         '@utils': path.resolve(__dirname, './src/utils'),
         '@db': path.resolve(__dirname, './src/db'),
-        '@config': path.resolve(__dirname, './src/config')
+        '@config': path.resolve(__dirname, './src/config'),
+        '@adapters': path.resolve(__dirname, './src/adapters')
       }
     },
     
-    // Build configuration
     build: {
-      // Output directory
       outDir: env.VITE_BUILD_OUTPUT_DIR || 'dist',
-      
-      // Target browsers
       target: ['es2015', 'edge88', 'firefox78', 'chrome87', 'safari13.1'],
-      
-      // Generate source maps
       sourcemap: env.VITE_BUILD_SOURCEMAP === 'true' || mode === 'development',
-      
-      // Minification
       minify: env.VITE_BUILD_MINIFY !== 'false' ? 'terser' : false,
       
-      // Terser options for better minification
       terserOptions: {
         compress: {
           drop_console: mode === 'production',
@@ -154,19 +165,12 @@ export default defineConfig(({ mode }) => {
         }
       },
       
-      // Polyfill for dynamic imports
       polyfillModulePreload: true,
-      
-      // Asset inline limit
       assetsInlineLimit: parseInt(env.VITE_BUILD_ASSET_INLINE_LIMIT || '4096', 10),
-      
-      // Chunk size warnings
       chunkSizeWarningLimit: 1000,
       
-      // Rollup options for code splitting
       rollupOptions: {
         output: {
-          // Manual chunks for better caching
           manualChunks: {
             'react-vendor': ['react', 'react-dom'],
             'router-vendor': ['react-router-dom'],
@@ -176,7 +180,6 @@ export default defineConfig(({ mode }) => {
             'state-vendor': ['zustand', 'valtio'],
             'util-vendor': ['axios', 'date-fns', 'zod']
           },
-          // Asset file naming
           assetFileNames: (assetInfo) => {
             const info = assetInfo.name?.split('.') || [];
             const ext = info[info.length - 1];
@@ -189,85 +192,36 @@ export default defineConfig(({ mode }) => {
             }
             return `assets/[name]-[hash][extname]`;
           },
-          // Chunk file naming
           chunkFileNames: 'assets/js/[name]-[hash].js',
-          // Entry file naming
           entryFileNames: 'assets/js/[name]-[hash].js'
         }
       },
       
-      // Enable/disable CSS code splitting
       cssCodeSplit: true,
-      
-      // Rollup external dependencies (don't bundle these)
-      // Uncomment if you want to exclude certain packages
-      // rollupOptions: {
-      //   external: ['some-large-dependency']
-      // }
     },
     
-    // Development server configuration
     server: {
-      // Host configuration
-      host: devServerHost === 'true' || devServerHost === '0.0.0.0' ? true : devServerHost,
-      
-      // Port with fallback handling
+      host: devServerHost === 'true' || devServerHost === '0.0.0.0' 
+        ? true 
+        : devServerHost,
       port: devServerPort,
-      
-      // CRITICAL FIX: Allow automatic port selection if specified port is taken
-      strictPort: false,
-      
-      // Open browser automatically
+      strictPort: false, // BUG FIX #12: Allow port fallback
       open: devServerOpen,
-      
-      // CORS configuration
       cors: true,
       
-      // HMR (Hot Module Replacement) configuration
       hmr: {
         overlay: true,
-        // Uncomment if using custom HMR port
-        // port: devServerPort + 1
       },
       
-      // Proxy configuration for API requests (optional)
-      // Useful for avoiding CORS during development
-      proxy: {
-        // Example: Proxy /api requests to 511.org
-        // '/api': {
-        //   target: 'https://api.511.org',
-        //   changeOrigin: true,
-        //   rewrite: (path) => path.replace(/^\/api/, ''),
-        //   configure: (proxy, _options) => {
-        //     proxy.on('error', (err, _req, _res) => {
-        //       console.log('proxy error', err);
-        //     });
-        //     proxy.on('proxyReq', (proxyReq, req, _res) => {
-        //       console.log('Sending Request to the Target:', req.method, req.url);
-        //     });
-        //     proxy.on('proxyRes', (proxyRes, req, _res) => {
-        //       console.log('Received Response from the Target:', proxyRes.statusCode, req.url);
-        //     });
-        //   }
-        // }
-      },
-      
-      // Watch options
       watch: {
-        // Ignore node_modules for better performance
         ignored: ['**/node_modules/**', '**/dist/**', '**/.git/**']
       },
       
-      // File system access restrictions for security
       fs: {
-        // Allow serving files from parent directories (if needed)
-        // strict: false,
-        // Allowed directories
         allow: ['.']
       }
     },
     
-    // Preview server configuration (for production builds)
     preview: {
       port: devServerPort + 1000,
       strictPort: false,
@@ -276,9 +230,7 @@ export default defineConfig(({ mode }) => {
       open: devServerOpen
     },
     
-    // Optimization configuration
     optimizeDeps: {
-      // Force pre-bundling of these dependencies
       include: [
         'react',
         'react-dom',
@@ -287,36 +239,27 @@ export default defineConfig(({ mode }) => {
         'leaflet',
         'zustand'
       ],
-      // Exclude these from optimization
       exclude: ['@vite/client', '@vite/env'],
-      // Enable esbuild optimization
       esbuildOptions: {
         target: 'es2015'
       }
     },
     
-    // Environment variable prefix
     envPrefix: 'VITE_',
     
-    // CSS configuration
     css: {
-      // CSS modules configuration
       modules: {
         localsConvention: 'camelCase'
       },
-      // PostCSS configuration (reads from postcss.config.js)
       postcss: './postcss.config.js',
-      // Preprocessor options
       preprocessorOptions: {
         scss: {
           additionalData: `@import "@/styles/variables.scss";`
         }
       },
-      // Enable CSS source maps in development
       devSourcemap: mode === 'development'
     },
     
-    // Test configuration (if using Vitest)
     test: {
       globals: true,
       environment: 'jsdom',
@@ -335,10 +278,13 @@ export default defineConfig(({ mode }) => {
       }
     },
     
-    // Logging level
     logLevel: mode === 'development' ? 'info' : 'warn',
+    clearScreen: true,
     
-    // Clear screen on reload
-    clearScreen: true
+    // BUG FIX #17: Additional esbuild drop configuration
+    esbuild: {
+      drop: mode === 'production' ? ['console', 'debugger'] : [],
+      legalComments: 'none',
+    }
   };
 });
