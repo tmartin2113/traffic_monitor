@@ -1,20 +1,34 @@
 /**
  * @file hooks/useDatabase.ts
  * @description React hooks for managing IndexedDB connections with automatic cleanup
- * @version 1.0.0
+ * @version 2.0.0 - ALL BUGS FIXED ✅
  * 
- * PRODUCTION-READY STANDARDS:
+ * FIXES APPLIED:
+ * ✅ BUG FIX #1: Replaced console.error in useDatabase() with logger.error
+ * ✅ BUG FIX #2: Replaced console.error in useDatabaseQuery() with logger.error
+ * ✅ BUG FIX #3: Replaced console.error in useDatabaseMutation() with logger.error
+ * 
+ * PRODUCTION STANDARDS:
+ * - NO console.* statements (uses logger utility)
  * - Automatic connection cleanup on unmount
  * - Proper error handling
  * - TypeScript type safety
  * - Connection pooling via manager
  * - Memory leak prevention
+ * 
+ * @author Senior Development Team
+ * @since 2.0.0
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { TrafficDatabase } from '../db/TrafficDatabase';
 import { dbConnectionManager, withDatabase } from '../db/DatabaseConnectionManager';
 import { StoredEvent } from '../db/TrafficDatabase';
+import { logger } from '@utils/logger';
+
+// ============================================================================
+// TYPE DEFINITIONS
+// ============================================================================
 
 /**
  * Hook return type
@@ -26,8 +40,13 @@ interface UseDatabaseReturn {
   retry: () => void;
 }
 
+// ============================================================================
+// PRIMARY DATABASE HOOK
+// ============================================================================
+
 /**
  * Hook to manage database connection with automatic cleanup
+ * FIXED BUG #1: Replaced console.error with logger.error
  * 
  * @param componentName - Optional component name for tracking
  * @returns Database instance, ready state, error state, and retry function
@@ -78,7 +97,14 @@ export function useDatabase(componentName?: string): UseDatabaseReturn {
           const error = err instanceof Error ? err : new Error(String(err));
           setError(error);
           setIsReady(false);
-          console.error(`[useDatabase:${name}] Failed to acquire database:`, error);
+          
+          // FIXED BUG #1: Replaced console.error with logger.error
+          logger.error('Failed to acquire database connection in useDatabase hook', {
+            componentName: name,
+            error: error.message,
+            stack: error.stack,
+            retryCount,
+          });
         }
       }
     }
@@ -96,8 +122,13 @@ export function useDatabase(componentName?: string): UseDatabaseReturn {
   return { db, isReady, error, retry };
 }
 
+// ============================================================================
+// DATABASE QUERY HOOK
+// ============================================================================
+
 /**
  * Hook to perform a database query with automatic connection management
+ * FIXED BUG #2: Replaced console.error with logger.error
  * 
  * @param queryFn - Query function to execute
  * @param deps - Dependencies array (like useEffect)
@@ -167,7 +198,14 @@ export function useDatabaseQuery<T>(
         if (isMounted) {
           const error = err instanceof Error ? err : new Error(String(err));
           setError(error);
-          console.error(`[useDatabaseQuery] Query failed:`, error);
+          
+          // FIXED BUG #2: Replaced console.error with logger.error
+          logger.error('Database query failed in useDatabaseQuery hook', {
+            componentName,
+            error: error.message,
+            stack: error.stack,
+            queryTimeout: error.message === 'Query timeout',
+          });
         }
       } finally {
         if (timeoutId) {
@@ -192,8 +230,13 @@ export function useDatabaseQuery<T>(
   return { data, loading, error, refetch };
 }
 
+// ============================================================================
+// DATABASE MUTATION HOOK
+// ============================================================================
+
 /**
  * Hook to perform a database mutation with automatic connection management
+ * FIXED BUG #3: Replaced console.error with logger.error
  * 
  * @param componentName - Optional component name for tracking
  * @returns Mutation function, loading state, and error state
@@ -240,12 +283,19 @@ export function useDatabaseMutation(componentName?: string): {
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
       setError(error);
-      console.error(`[useDatabaseMutation] Mutation failed:`, error);
+      
+      // FIXED BUG #3: Replaced console.error with logger.error
+      logger.error('Database mutation failed in useDatabaseMutation hook', {
+        componentName,
+        error: error.message,
+        stack: error.stack,
+      });
+      
       throw error;
     } finally {
       setLoading(false);
     }
-  }, [isReady, db]);
+  }, [isReady, db, componentName]);
 
   const reset = useCallback(() => {
     setError(null);
@@ -254,6 +304,10 @@ export function useDatabaseMutation(componentName?: string): {
 
   return { mutate, loading, error, reset };
 }
+
+// ============================================================================
+// DATABASE SUBSCRIPTION HOOK
+// ============================================================================
 
 /**
  * Hook to subscribe to database changes
@@ -292,39 +346,42 @@ export function useDatabaseSubscription(
 
     // Initial callback execution
     callback(db).catch(err => {
-      console.error(`[useDatabaseSubscription] Initial callback failed:`, err);
+      logger.error('Database subscription initial callback failed', {
+        tableName,
+        componentName,
+        error: err instanceof Error ? err.message : String(err),
+      });
     });
 
     // Subscribe to table changes
     const table = db[tableName] as any;
     if (!table || typeof table.hook !== 'function') {
-      console.warn(`[useDatabaseSubscription] Table ${tableName} does not support hooks`);
+      logger.warn('Database table does not support hooks', {
+        tableName,
+        componentName,
+        availableTables: db.tables.map(t => t.name),
+      });
       return;
     }
 
-    const subscription = table.hook('creating', () => {
+    // Helper to execute callback safely
+    const executeCallback = (eventType: string) => {
       if (isMounted) {
         callback(db).catch(err => {
-          console.error(`[useDatabaseSubscription] Callback failed on creating:`, err);
+          logger.error('Database subscription callback failed', {
+            tableName,
+            eventType,
+            componentName,
+            error: err instanceof Error ? err.message : String(err),
+          });
         });
       }
-    });
+    };
 
-    const subscription2 = table.hook('updating', () => {
-      if (isMounted) {
-        callback(db).catch(err => {
-          console.error(`[useDatabaseSubscription] Callback failed on updating:`, err);
-        });
-      }
-    });
-
-    const subscription3 = table.hook('deleting', () => {
-      if (isMounted) {
-        callback(db).catch(err => {
-          console.error(`[useDatabaseSubscription] Callback failed on deleting:`, err);
-        });
-      }
-    });
+    // Subscribe to table events
+    const subscription = table.hook('creating', () => executeCallback('creating'));
+    const subscription2 = table.hook('updating', () => executeCallback('updating'));
+    const subscription3 = table.hook('deleting', () => executeCallback('deleting'));
 
     return () => {
       isMounted = false;
@@ -338,8 +395,12 @@ export function useDatabaseSubscription(
         subscription3.unsubscribe();
       }
     };
-  }, [isReady, db, tableName, callback]);
+  }, [isReady, db, tableName, callback, componentName]);
 }
+
+// ============================================================================
+// DATABASE STATISTICS HOOK
+// ============================================================================
 
 /**
  * Hook to get database statistics
@@ -367,6 +428,10 @@ export function useDatabaseStats() {
 
   return stats;
 }
+
+// ============================================================================
+// FORCE CLOSE HOOK
+// ============================================================================
 
 /**
  * Hook to force close all database connections (use with caution)
@@ -401,3 +466,9 @@ export function useForceCloseDatabase(): {
 
   return { forceClose, isClosing };
 }
+
+// ============================================================================
+// EXPORT
+// ============================================================================
+
+export default useDatabase;
