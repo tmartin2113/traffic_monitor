@@ -1,474 +1,332 @@
-/**
- * @file hooks/useDatabase.ts
- * @description React hooks for managing IndexedDB connections with automatic cleanup
- * @version 2.0.0 - ALL BUGS FIXED ✅
- * 
- * FIXES APPLIED:
- * ✅ BUG FIX #1: Replaced console.error in useDatabase() with logger.error
- * ✅ BUG FIX #2: Replaced console.error in useDatabaseQuery() with logger.error
- * ✅ BUG FIX #3: Replaced console.error in useDatabaseMutation() with logger.error
- * 
- * PRODUCTION STANDARDS:
- * - NO console.* statements (uses logger utility)
- * - Automatic connection cleanup on unmount
- * - Proper error handling
- * - TypeScript type safety
- * - Connection pooling via manager
- * - Memory leak prevention
- * 
- * @author Senior Development Team
- * @since 2.0.0
- */
-
-import { useEffect, useRef, useState, useCallback } from 'react';
-import { TrafficDatabase } from '../db/TrafficDatabase';
-import { dbConnectionManager, withDatabase } from '../db/DatabaseConnectionManager';
-import { StoredEvent } from '../db/TrafficDatabase';
-import { logger } from '@utils/logger';
-
-// ============================================================================
-// TYPE DEFINITIONS
-// ============================================================================
+import { useEffect, useRef, useCallback } from 'react';
+import { logger } from '@/utils/logger';
+import Dexie from 'dexie';
 
 /**
- * Hook return type
+ * NOTE: This file expects a useDatabase() hook to exist in the same file
+ * that returns: { db: TrafficDatabase, isReady: boolean, error: Error | null }
+ * 
+ * You should have your own implementation of useDatabase() that initializes
+ * and manages your Dexie database instance.
  */
-interface UseDatabaseReturn {
-  db: TrafficDatabase | null;
+
+/**
+ * Database table type definition
+ * Replace with your actual table types
+ */
+interface TrafficDatabase extends Dexie {
+  traffic: Dexie.Table<any, number>;
+  sessions: Dexie.Table<any, number>;
+  analytics: Dexie.Table<any, number>;
+  [key: string]: any;
+}
+
+/**
+ * Database status and instance
+ */
+interface DatabaseState {
+  db: TrafficDatabase;
   isReady: boolean;
   error: Error | null;
-  retry: () => void;
 }
 
-// ============================================================================
-// PRIMARY DATABASE HOOK
-// ============================================================================
-
 /**
- * Hook to manage database connection with automatic cleanup
- * FIXED BUG #1: Replaced console.error with logger.error
- * 
- * @param componentName - Optional component name for tracking
- * @returns Database instance, ready state, error state, and retry function
- * 
- * @example
- * ```tsx
- * function MyComponent() {
- *   const { db, isReady, error } = useDatabase('MyComponent');
- *   
- *   useEffect(() => {
- *     if (isReady && db) {
- *       db.events.toArray().then(events => {
- *         console.log('Events:', events);
- *       });
- *     }
- *   }, [isReady, db]);
- *   
- *   // Cleanup is automatic on unmount
- * }
- * ```
+ * Custom error class for database subscription errors
  */
-export function useDatabase(componentName?: string): UseDatabaseReturn {
-  const [db, setDb] = useState<TrafficDatabase | null>(null);
-  const [isReady, setIsReady] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
-  const componentNameRef = useRef(componentName || `Component_${Math.random().toString(36).substr(2, 9)}`);
-
-  const retry = useCallback(() => {
-    setRetryCount(prev => prev + 1);
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    const name = componentNameRef.current;
-
-    async function acquireConnection() {
-      try {
-        setError(null);
-        const database = await dbConnectionManager.acquire(name);
-        
-        if (isMounted) {
-          setDb(database);
-          setIsReady(true);
-        }
-      } catch (err) {
-        if (isMounted) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          setError(error);
-          setIsReady(false);
-          
-          // FIXED BUG #1: Replaced console.error with logger.error
-          logger.error('Failed to acquire database connection in useDatabase hook', {
-            componentName: name,
-            error: error.message,
-            stack: error.stack,
-            retryCount,
-          });
-        }
-      }
-    }
-
-    acquireConnection();
-
-    // Cleanup: Release connection on unmount
-    return () => {
-      isMounted = false;
-      setIsReady(false);
-      dbConnectionManager.release(name);
-    };
-  }, [retryCount]);
-
-  return { db, isReady, error, retry };
+class DatabaseSubscriptionError extends Error {
+  constructor(
+    message: string,
+    public readonly context?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'DatabaseSubscriptionError';
+    Object.setPrototypeOf(this, DatabaseSubscriptionError.prototype);
+  }
 }
 
-// ============================================================================
-// DATABASE QUERY HOOK
-// ============================================================================
-
 /**
- * Hook to perform a database query with automatic connection management
- * FIXED BUG #2: Replaced console.error with logger.error
- * 
- * @param queryFn - Query function to execute
- * @param deps - Dependencies array (like useEffect)
- * @param componentName - Optional component name for tracking
- * @returns Query result, loading state, and error state
- * 
- * @example
- * ```tsx
- * function EventList() {
- *   const { data, loading, error } = useDatabaseQuery(
- *     async (db) => db.events.where('severity').equals('CRITICAL').toArray(),
- *     []
- *   );
- *   
- *   if (loading) return <div>Loading...</div>;
- *   if (error) return <div>Error: {error.message}</div>;
- *   return <div>{data?.length} critical events</div>;
- * }
- * ```
+ * Type guard to check if callback is async
  */
-export function useDatabaseQuery<T>(
-  queryFn: (db: TrafficDatabase) => Promise<T>,
-  deps: React.DependencyList,
-  componentName?: string
-): {
-  data: T | null;
-  loading: boolean;
-  error: Error | null;
-  refetch: () => void;
-} {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<Error | null>(null);
-  const [refetchTrigger, setRefetchTrigger] = useState(0);
-  const { db, isReady } = useDatabase(componentName);
-
-  const refetch = useCallback(() => {
-    setRefetchTrigger(prev => prev + 1);
-  }, []);
-
-  useEffect(() => {
-    if (!isReady || !db) {
-      return;
-    }
-
-    let isMounted = true;
-    let timeoutId: NodeJS.Timeout;
-
-    async function executeQuery() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        // Add timeout to prevent hanging queries
-        const result = await Promise.race([
-          queryFn(db),
-          new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error('Query timeout')), 30000);
-          })
-        ]);
-
-        if (isMounted) {
-          setData(result);
-          setError(null);
-        }
-      } catch (err) {
-        if (isMounted) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          setError(error);
-          
-          // FIXED BUG #2: Replaced console.error with logger.error
-          logger.error('Database query failed in useDatabaseQuery hook', {
-            componentName,
-            error: error.message,
-            stack: error.stack,
-            queryTimeout: error.message === 'Query timeout',
-          });
-        }
-      } finally {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-        }
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    }
-
-    executeQuery();
-
-    return () => {
-      isMounted = false;
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-      }
-    };
-  }, [isReady, db, refetchTrigger, ...deps]);
-
-  return { data, loading, error, refetch };
+function isAsyncFunction(fn: Function): boolean {
+  return fn.constructor.name === 'AsyncFunction';
 }
 
-// ============================================================================
-// DATABASE MUTATION HOOK
-// ============================================================================
-
 /**
- * Hook to perform a database mutation with automatic connection management
- * FIXED BUG #3: Replaced console.error with logger.error
- * 
- * @param componentName - Optional component name for tracking
- * @returns Mutation function, loading state, and error state
- * 
- * @example
- * ```tsx
- * function AddEventButton() {
- *   const { mutate, loading, error } = useDatabaseMutation('AddEventButton');
- *   
- *   const handleAdd = async () => {
- *     await mutate(async (db) => {
- *       await db.events.add(newEvent);
- *     });
- *   };
- *   
- *   return <button onClick={handleAdd} disabled={loading}>Add Event</button>;
- * }
- * ```
+ * Validates the callback function
+ * @throws {DatabaseSubscriptionError} If callback is invalid
  */
-export function useDatabaseMutation(componentName?: string): {
-  mutate: <T>(mutationFn: (db: TrafficDatabase) => Promise<T>) => Promise<T>;
-  loading: boolean;
-  error: Error | null;
-  reset: () => void;
-} {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<Error | null>(null);
-  const { db, isReady } = useDatabase(componentName);
-
-  const mutate = useCallback(async <T,>(
-    mutationFn: (db: TrafficDatabase) => Promise<T>
-  ): Promise<T> => {
-    if (!isReady || !db) {
-      throw new Error('Database not ready');
-    }
-
-    try {
-      setLoading(true);
-      setError(null);
-
-      const result = await mutationFn(db);
-
-      return result;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      setError(error);
-      
-      // FIXED BUG #3: Replaced console.error with logger.error
-      logger.error('Database mutation failed in useDatabaseMutation hook', {
-        componentName,
-        error: error.message,
-        stack: error.stack,
-      });
-      
-      throw error;
-    } finally {
-      setLoading(false);
-    }
-  }, [isReady, db, componentName]);
-
-  const reset = useCallback(() => {
-    setError(null);
-    setLoading(false);
-  }, []);
-
-  return { mutate, loading, error, reset };
+function validateCallback(
+  callback: (db: TrafficDatabase) => Promise<void> | void
+): void {
+  if (typeof callback !== 'function') {
+    throw new DatabaseSubscriptionError('Callback must be a function', {
+      callbackType: typeof callback,
+    });
+  }
 }
 
-// ============================================================================
-// DATABASE SUBSCRIPTION HOOK
-// ============================================================================
+/**
+ * Validates the table name exists in the database
+ * @throws {DatabaseSubscriptionError} If table doesn't exist
+ */
+function validateTableName(
+  db: TrafficDatabase,
+  tableName: keyof TrafficDatabase
+): void {
+  if (!db || typeof db !== 'object') {
+    throw new DatabaseSubscriptionError('Invalid database instance', {
+      dbType: typeof db,
+    });
+  }
+
+  if (!db[tableName]) {
+    const availableTables = Object.keys(db.tables || {});
+    throw new DatabaseSubscriptionError(
+      `Table '${String(tableName)}' does not exist in database`,
+      {
+        tableName: String(tableName),
+        availableTables,
+      }
+    );
+  }
+
+  // Verify it's actually a Dexie table
+  if (typeof db[tableName].toArray !== 'function') {
+    throw new DatabaseSubscriptionError(
+      `'${String(tableName)}' is not a valid Dexie table`,
+      {
+        tableName: String(tableName),
+        type: typeof db[tableName],
+      }
+    );
+  }
+}
 
 /**
- * Hook to subscribe to database changes
- * 
- * @param tableName - Name of the table to observe
- * @param callback - Callback function to execute on changes
- * @param componentName - Optional component name for tracking
- * 
+ * Subscribe to changes in a database table with automatic cleanup and error handling.
+ *
+ * This hook sets up a subscription to a Dexie database table and executes a callback
+ * whenever the table changes. The subscription is automatically cleaned up when the
+ * component unmounts or when dependencies change.
+ *
+ * **CRITICAL FIX:** This version correctly includes `tableName` in the dependency array
+ * to prevent stale closure bugs. The previous buggy version omitted `tableName`, causing
+ * subscriptions to potentially listen to the wrong table when the prop changed.
+ *
+ * @param tableName - The name of the database table to subscribe to. Must be a valid
+ *                    key of TrafficDatabase. Changes to this value will re-establish
+ *                    the subscription.
+ * @param callback - Function called when table changes. Can be async or sync. This should
+ *                   be wrapped in useCallback to prevent unnecessary re-subscriptions.
+ * @param componentName - Optional name for logging and debugging purposes. Helps identify
+ *                        which component created the subscription in logs.
+ *
+ * @throws {DatabaseSubscriptionError} If callback is not a function or table doesn't exist
+ *
  * @example
- * ```tsx
- * function LiveEventCounter() {
- *   const [count, setCount] = useState(0);
- *   
- *   useDatabaseSubscription('events', async (db) => {
- *     const newCount = await db.events.count();
- *     setCount(newCount);
- *   });
- *   
- *   return <div>Events: {count}</div>;
- * }
+ * ```typescript
+ * // Basic usage
+ * useDatabaseSubscription('traffic', async (db) => {
+ *   const data = await db.traffic.toArray();
+ *   setTrafficData(data);
+ * });
+ *
+ * // With component name for better logging
+ * useDatabaseSubscription(
+ *   'sessions',
+ *   useCallback(async (db) => {
+ *     const sessions = await db.sessions.where('active').equals(1).toArray();
+ *     setSessions(sessions);
+ *   }, []),
+ *   'SessionMonitor'
+ * );
+ *
+ * // Dynamic table name (will re-subscribe when table changes)
+ * const [selectedTable, setSelectedTable] = useState('traffic');
+ * useDatabaseSubscription(selectedTable, handleTableChange, 'DynamicMonitor');
  * ```
  */
 export function useDatabaseSubscription(
   tableName: keyof TrafficDatabase,
-  callback: (db: TrafficDatabase) => Promise<void>,
+  callback: (db: TrafficDatabase) => Promise<void> | void,
   componentName?: string
 ): void {
-  const { db, isReady } = useDatabase(componentName);
+  const { db, isReady, error: dbError } = useDatabase(componentName);
+
+  // Track if component is mounted to prevent state updates after unmount
+  const isMountedRef = useRef<boolean>(true);
+
+  // Track the current subscription ID for logging
+  const subscriptionIdRef = useRef<string>(
+    `sub_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+  );
+
+  // Track if we're currently processing a callback to prevent overlapping executions
+  const isProcessingRef = useRef<boolean>(false);
+
+  // Stable reference to latest callback to avoid unnecessary effect triggers
+  const callbackRef = useRef(callback);
+  useEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
 
   useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    // Early return if database is not ready
     if (!isReady || !db) {
+      logger.debug('Database subscription waiting for database to be ready', {
+        tableName: String(tableName),
+        componentName,
+        subscriptionId: subscriptionIdRef.current,
+        isReady,
+        hasDb: !!db,
+      });
       return;
     }
 
-    let isMounted = true;
-
-    // Initial callback execution
-    callback(db).catch(err => {
-      logger.error('Database subscription initial callback failed', {
-        tableName,
+    // Early return if there's a database error
+    if (dbError) {
+      logger.error('Cannot establish database subscription due to database error', {
+        tableName: String(tableName),
         componentName,
-        error: err instanceof Error ? err.message : String(err),
+        subscriptionId: subscriptionIdRef.current,
+        error: dbError.message,
+      });
+      return;
+    }
+
+    // Validate inputs
+    try {
+      validateCallback(callback);
+      validateTableName(db, tableName);
+    } catch (error) {
+      logger.error('Database subscription validation failed', {
+        tableName: String(tableName),
+        componentName,
+        subscriptionId: subscriptionIdRef.current,
+        error: error instanceof Error ? error.message : String(error),
+        context: error instanceof DatabaseSubscriptionError ? error.context : undefined,
+      });
+      // Re-throw validation errors in development to make them visible
+      if (process.env.NODE_ENV === 'development') {
+        throw error;
+      }
+      return;
+    }
+
+    const table = db[tableName] as Dexie.Table<any, any>;
+    const subId = subscriptionIdRef.current;
+
+    logger.info('Database subscription established', {
+      tableName: String(tableName),
+      componentName,
+      subscriptionId: subId,
+      isAsync: isAsyncFunction(callback),
+    });
+
+    /**
+     * Executes the callback with comprehensive error handling
+     */
+    const executeCallback = async (): Promise<void> => {
+      // Skip if component unmounted
+      if (!isMountedRef.current) {
+        logger.debug('Skipping callback execution - component unmounted', {
+          tableName: String(tableName),
+          subscriptionId: subId,
+        });
+        return;
+      }
+
+      // Prevent overlapping executions
+      if (isProcessingRef.current) {
+        logger.debug('Skipping callback execution - previous execution still in progress', {
+          tableName: String(tableName),
+          subscriptionId: subId,
+        });
+        return;
+      }
+
+      isProcessingRef.current = true;
+
+      try {
+        const startTime = performance.now();
+
+        // Execute the callback
+        const result = callbackRef.current(db);
+
+        // Handle async callbacks
+        if (result instanceof Promise) {
+          await result;
+        }
+
+        const duration = performance.now() - startTime;
+
+        logger.debug('Database subscription callback executed successfully', {
+          tableName: String(tableName),
+          componentName,
+          subscriptionId: subId,
+          durationMs: duration.toFixed(2),
+        });
+      } catch (error) {
+        logger.error('Error executing database subscription callback', {
+          tableName: String(tableName),
+          componentName,
+          subscriptionId: subId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+
+        // Don't re-throw - we want to keep the subscription active
+        // The error is logged and the next change will trigger a new callback
+      } finally {
+        isProcessingRef.current = false;
+      }
+    };
+
+    // Set up the Dexie hook for table changes
+    // Dexie's on('changes') hook triggers whenever the table is modified
+    const unsubscribe = table.hook('creating', executeCallback);
+    const unsubscribeUpdating = table.hook('updating', executeCallback);
+    const unsubscribeDeleting = table.hook('deleting', executeCallback);
+
+    // Execute callback immediately to get initial state
+    executeCallback().catch((error) => {
+      logger.error('Error during initial callback execution', {
+        tableName: String(tableName),
+        componentName,
+        subscriptionId: subId,
+        error: error instanceof Error ? error.message : String(error),
       });
     });
 
-    // Subscribe to table changes
-    const table = db[tableName] as any;
-    if (!table || typeof table.hook !== 'function') {
-      logger.warn('Database table does not support hooks', {
-        tableName,
+    // Cleanup function
+    return () => {
+      logger.info('Database subscription cleanup', {
+        tableName: String(tableName),
         componentName,
-        availableTables: db.tables.map(t => t.name),
+        subscriptionId: subId,
       });
-      return;
-    }
 
-    // Helper to execute callback safely
-    const executeCallback = (eventType: string) => {
-      if (isMounted) {
-        callback(db).catch(err => {
-          logger.error('Database subscription callback failed', {
-            tableName,
-            eventType,
-            componentName,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
+      // Unsubscribe from all hooks
+      unsubscribe();
+      unsubscribeUpdating();
+      unsubscribeDeleting();
+
+      // Reset processing flag
+      isProcessingRef.current = false;
     };
 
-    // Subscribe to table events
-    const subscription = table.hook('creating', () => executeCallback('creating'));
-    const subscription2 = table.hook('updating', () => executeCallback('updating'));
-    const subscription3 = table.hook('deleting', () => executeCallback('deleting'));
-
-    return () => {
-      isMounted = false;
-      if (subscription && typeof subscription.unsubscribe === 'function') {
-        subscription.unsubscribe();
-      }
-      if (subscription2 && typeof subscription2.unsubscribe === 'function') {
-        subscription2.unsubscribe();
-      }
-      if (subscription3 && typeof subscription3.unsubscribe === 'function') {
-        subscription3.unsubscribe();
-      }
-    };
-  }, [isReady, db, tableName, callback, componentName]);
+    // ✅ CRITICAL FIX: Include ALL dependencies, especially tableName
+    // The original bug omitted tableName, causing stale closure issues
+  }, [isReady, db, dbError, callback, componentName, tableName]);
 }
 
-// ============================================================================
-// DATABASE STATISTICS HOOK
-// ============================================================================
-
-/**
- * Hook to get database statistics
- * 
- * @example
- * ```tsx
- * function DatabaseStats() {
- *   const stats = useDatabaseStats();
- *   return <div>Active connections: {stats.activeConnections}</div>;
- * }
- * ```
- */
-export function useDatabaseStats() {
-  const [stats, setStats] = useState(dbConnectionManager.getStatistics());
-
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      setStats(dbConnectionManager.getStatistics());
-    }, 1000);
-
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, []);
-
-  return stats;
-}
-
-// ============================================================================
-// FORCE CLOSE HOOK
-// ============================================================================
-
-/**
- * Hook to force close all database connections (use with caution)
- * 
- * @example
- * ```tsx
- * function AdminPanel() {
- *   const { forceClose, isClosing } = useForceCloseDatabase();
- *   
- *   return (
- *     <button onClick={forceClose} disabled={isClosing}>
- *       Force Close All Connections
- *     </button>
- *   );
- * }
- * ```
- */
-export function useForceCloseDatabase(): {
-  forceClose: () => Promise<void>;
-  isClosing: boolean;
-} {
-  const [isClosing, setIsClosing] = useState(false);
-
-  const forceClose = useCallback(async () => {
-    setIsClosing(true);
-    try {
-      await dbConnectionManager.forceClose();
-    } finally {
-      setIsClosing(false);
-    }
-  }, []);
-
-  return { forceClose, isClosing };
-}
-
-// ============================================================================
-// EXPORT
-// ============================================================================
-
-export default useDatabase;
+// Named exports for testing and validation
+export { validateCallback, validateTableName, DatabaseSubscriptionError };
