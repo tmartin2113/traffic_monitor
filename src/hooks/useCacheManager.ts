@@ -65,6 +65,9 @@ function validateMaxSize(maxSizeBytes: number): void {
  * **IMPORTANT:** This hook uses useEffect to properly set up and tear down the interval.
  * The previous buggy version used useCallback, which never executed the interval setup.
  * 
+ * **NOTE:** This function requires a useCacheManager() hook to exist in the same file
+ * that returns: { getStats: () => CacheStats, clearAll: () => void, clearItem: (key: string) => void }
+ * 
  * @param maxSizeBytes - Maximum allowed cache size in bytes. Default: 10MB (10 * 1024 * 1024)
  *                       Must be a positive finite number.
  * @param checkIntervalMs - How often to check cache size in milliseconds. Default: 60000 (1 minute)
@@ -205,37 +208,4 @@ export function useAutoCacheSizeLimit(
       });
     };
   }, [maxSizeBytes, checkIntervalMs, getStats, clearAll]);
-}
-
-/**
- * Mock implementation of useCacheManager for demonstration.
- * Replace this with your actual cache manager implementation.
- */
-function useCacheManager(): CacheManager {
-  const getStats = useCallback((): CacheStats => {
-    // This is a mock implementation
-    // Replace with your actual cache stats logic
-    return {
-      estimatedSize: 0,
-      itemCount: 0,
-      lastCleared: undefined,
-    };
-  }, []);
-
-  const clearAll = useCallback((): void => {
-    // This is a mock implementation
-    // Replace with your actual cache clearing logic
-    logger.info('Cache cleared');
-  }, []);
-
-  const clearItem = useCallback((key: string): void => {
-    // This is a mock implementation
-    logger.info('Cache item cleared', { key });
-  }, []);
-
-  return {
-    getStats,
-    clearAll,
-    clearItem,
-  };
 }
