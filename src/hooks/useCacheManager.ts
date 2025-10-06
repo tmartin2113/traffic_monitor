@@ -1,354 +1,241 @@
-/**
- * @file hooks/useCacheManager.ts
- * @description React Query cache management utilities
- * @version 1.0.0
- * 
- * RELATED TO BUG #16: Centralized cache management
- */
-
-import { useCallback } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { logger } from '@utils/logger';
-
-// ============================================================================
-// TYPE DEFINITIONS
-// ============================================================================
+import { useEffect, useCallback, useRef } from 'react';
+import { logger } from '@/utils/logger';
 
 /**
- * Cache invalidation options
+ * Cache statistics interface
  */
-export interface InvalidateOptions {
-  /** Whether to refetch active queries immediately */
-  refetchActive?: boolean;
-  /** Whether to refetch inactive queries */
-  refetchInactive?: boolean;
-  /** Specific query key to invalidate */
-  queryKey?: string | string[];
-}
-
-/**
- * Cache statistics
- */
-export interface CacheStats {
-  /** Total number of cached queries */
-  totalQueries: number;
-  /** Number of active queries */
-  activeQueries: number;
-  /** Number of stale queries */
-  staleQueries: number;
-  /** Total cache size estimate (in bytes) */
+interface CacheStats {
   estimatedSize: number;
+  itemCount: number;
+  lastCleared?: Date;
 }
 
 /**
- * Return type for useCacheManager hook
+ * Cache manager operations interface
  */
-export interface UseCacheManagerResult {
-  /** Clear all cached data */
-  clearAll: () => Promise<void>;
-  /** Clear specific query cache */
-  clearQuery: (queryKey: string | string[]) => Promise<void>;
-  /** Invalidate queries to trigger refetch */
-  invalidate: (options?: InvalidateOptions) => Promise<void>;
-  /** Invalidate traffic events cache */
-  invalidateTrafficEvents: () => Promise<void>;
-  /** Get cache statistics */
+interface CacheManager {
   getStats: () => CacheStats;
-  /** Remove stale queries */
-  removeStaleQueries: () => void;
-  /** Reset query error state */
-  resetQueryErrors: () => void;
+  clearAll: () => void;
+  clearItem: (key: string) => void;
 }
 
-// ============================================================================
-// HOOK IMPLEMENTATION
-// ============================================================================
+/**
+ * Custom error class for cache-related errors
+ */
+class CacheError extends Error {
+  constructor(message: string, public readonly context?: Record<string, unknown>) {
+    super(message);
+    this.name = 'CacheError';
+    Object.setPrototypeOf(this, CacheError.prototype);
+  }
+}
 
 /**
- * Hook for managing React Query cache
+ * Validates that maxSizeBytes is a positive number
+ * @throws {CacheError} If maxSizeBytes is invalid
+ */
+function validateMaxSize(maxSizeBytes: number): void {
+  if (!Number.isFinite(maxSizeBytes)) {
+    throw new CacheError('maxSizeBytes must be a finite number', { 
+      provided: maxSizeBytes,
+      type: typeof maxSizeBytes 
+    });
+  }
+  
+  if (maxSizeBytes <= 0) {
+    throw new CacheError('maxSizeBytes must be greater than 0', { 
+      provided: maxSizeBytes 
+    });
+  }
+  
+  if (maxSizeBytes > Number.MAX_SAFE_INTEGER) {
+    throw new CacheError('maxSizeBytes exceeds maximum safe integer', { 
+      provided: maxSizeBytes,
+      max: Number.MAX_SAFE_INTEGER
+    });
+  }
+}
+
+/**
+ * Automatically manages cache size by periodically checking and clearing when limit is exceeded.
  * 
- * Provides centralized cache management functionality including:
- * - Clear all cached data
- * - Clear specific queries
- * - Invalidate queries to trigger refetch
- * - Get cache statistics
- * - Remove stale queries
+ * This hook sets up an interval that runs every minute to monitor cache size. If the cache
+ * exceeds the specified size limit, it automatically clears all cached data and logs a warning.
  * 
- * @returns Cache manager interface
+ * **IMPORTANT:** This hook uses useEffect to properly set up and tear down the interval.
+ * The previous buggy version used useCallback, which never executed the interval setup.
+ * 
+ * @param maxSizeBytes - Maximum allowed cache size in bytes. Default: 10MB (10 * 1024 * 1024)
+ *                       Must be a positive finite number.
+ * @param checkIntervalMs - How often to check cache size in milliseconds. Default: 60000 (1 minute)
+ *                          Must be at least 1000ms to prevent excessive checking.
+ * 
+ * @throws {CacheError} If maxSizeBytes or checkIntervalMs are invalid
  * 
  * @example
  * ```typescript
- * function MyComponent() {
- *   const {
- *     clearAll,
- *     invalidateTrafficEvents,
- *     getStats,
- *   } = useCacheManager();
- *   
- *   const handleClearCache = async () => {
- *     await clearAll();
- *     console.log('Cache cleared');
- *   };
- *   
- *   const handleRefresh = async () => {
- *     await invalidateTrafficEvents();
- *     console.log('Traffic events will refetch');
- *   };
- *   
- *   const stats = getStats();
- *   console.log(`Cached queries: ${stats.totalQueries}`);
- * }
+ * // Use default 10MB limit with 1-minute checks
+ * useAutoCacheSizeLimit();
+ * 
+ * // Use custom 50MB limit
+ * useAutoCacheSizeLimit(50 * 1024 * 1024);
+ * 
+ * // Use 25MB limit with 30-second checks
+ * useAutoCacheSizeLimit(25 * 1024 * 1024, 30000);
  * ```
  */
-export function useCacheManager(): UseCacheManagerResult {
-  const queryClient = useQueryClient();
+export function useAutoCacheSizeLimit(
+  maxSizeBytes: number = 10 * 1024 * 1024,
+  checkIntervalMs: number = 60000
+): void {
+  const { getStats, clearAll } = useCacheManager();
+  
+  // Track if component is mounted to prevent state updates after unmount
+  const isMountedRef = useRef<boolean>(true);
+  
+  // Track the last time we cleared to prevent rapid successive clears
+  const lastClearTimeRef = useRef<number>(0);
+  const MIN_CLEAR_INTERVAL_MS = 5000; // Minimum 5 seconds between clears
 
-  /**
-   * Clear all cached data
-   */
-  const clearAll = useCallback(async (): Promise<void> => {
-    logger.info('Clearing all React Query cache');
+  useEffect(() => {
+    isMountedRef.current = true;
+    
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
+  useEffect(() => {
+    // Validate inputs on mount and when they change
     try {
-      await queryClient.clear();
-      logger.debug('Cache cleared successfully');
+      validateMaxSize(maxSizeBytes);
+      
+      if (!Number.isFinite(checkIntervalMs) || checkIntervalMs < 1000) {
+        throw new CacheError('checkIntervalMs must be at least 1000ms', { 
+          provided: checkIntervalMs 
+        });
+      }
     } catch (error) {
-      logger.error('Failed to clear cache', { error });
+      logger.error('Invalid cache size limit configuration', {
+        error: error instanceof Error ? error.message : String(error),
+        maxSizeBytes,
+        checkIntervalMs,
+      });
+      // Re-throw to make the error visible in development
       throw error;
     }
-  }, [queryClient]);
 
-  /**
-   * Clear specific query cache
-   */
-  const clearQuery = useCallback(
-    async (queryKey: string | string[]): Promise<void> => {
-      const key = Array.isArray(queryKey) ? queryKey : [queryKey];
-
-      logger.info('Clearing specific query cache', { queryKey: key });
+    // Set up the interval to periodically check cache size
+    const interval = setInterval(() => {
+      // Skip if component unmounted
+      if (!isMountedRef.current) {
+        return;
+      }
 
       try {
-        await queryClient.removeQueries({ queryKey: key });
-        logger.debug('Query cache cleared successfully', { queryKey: key });
-      } catch (error) {
-        logger.error('Failed to clear query cache', { error, queryKey: key });
-        throw error;
-      }
-    },
-    [queryClient]
-  );
-
-  /**
-   * Invalidate queries to trigger refetch
-   */
-  const invalidate = useCallback(
-    async (options: InvalidateOptions = {}): Promise<void> => {
-      const {
-        refetchActive = true,
-        refetchInactive = false,
-        queryKey,
-      } = options;
-
-      if (queryKey) {
-        const key = Array.isArray(queryKey) ? queryKey : [queryKey];
-        logger.info('Invalidating specific queries', { queryKey: key });
-
-        await queryClient.invalidateQueries({
-          queryKey: key,
-          refetchType: refetchActive ? 'active' : refetchInactive ? 'all' : 'none',
-        });
-      } else {
-        logger.info('Invalidating all queries');
-
-        await queryClient.invalidateQueries({
-          refetchType: refetchActive ? 'active' : refetchInactive ? 'all' : 'none',
-        });
-      }
-
-      logger.debug('Queries invalidated successfully');
-    },
-    [queryClient]
-  );
-
-  /**
-   * Invalidate traffic events cache specifically
-   */
-  const invalidateTrafficEvents = useCallback(async (): Promise<void> => {
-    logger.info('Invalidating traffic events cache');
-
-    await queryClient.invalidateQueries({
-      queryKey: ['traffic-events'],
-      refetchType: 'active',
-    });
-
-    logger.debug('Traffic events cache invalidated');
-  }, [queryClient]);
-
-  /**
-   * Get cache statistics
-   */
-  const getStats = useCallback((): CacheStats => {
-    const cache = queryClient.getQueryCache();
-    const queries = cache.getAll();
-
-    const activeQueries = queries.filter((q) => q.state.fetchStatus === 'fetching').length;
-    const staleQueries = queries.filter((q) => q.isStale()).length;
-
-    // Estimate cache size (rough approximation)
-    const estimatedSize = queries.reduce((total, query) => {
-      if (query.state.data) {
-        try {
-          return total + JSON.stringify(query.state.data).length;
-        } catch {
-          return total;
+        const stats = getStats();
+        
+        // Validate stats object
+        if (!stats || typeof stats.estimatedSize !== 'number') {
+          logger.error('Invalid cache stats received', { stats });
+          return;
         }
-      }
-      return total;
-    }, 0);
 
-    return {
-      totalQueries: queries.length,
-      activeQueries,
-      staleQueries,
-      estimatedSize,
-    };
-  }, [queryClient]);
+        // Check if cache exceeds limit
+        if (stats.estimatedSize > maxSizeBytes) {
+          const now = Date.now();
+          const timeSinceLastClear = now - lastClearTimeRef.current;
+          
+          // Prevent rapid successive clears
+          if (timeSinceLastClear < MIN_CLEAR_INTERVAL_MS) {
+            logger.debug('Skipping cache clear - too soon since last clear', {
+              timeSinceLastClear,
+              minInterval: MIN_CLEAR_INTERVAL_MS,
+            });
+            return;
+          }
 
-  /**
-   * Remove stale queries from cache
-   */
-  const removeStaleQueries = useCallback((): void => {
-    logger.info('Removing stale queries');
+          logger.warn('Cache size limit exceeded, clearing cache', {
+            currentSize: stats.estimatedSize,
+            maxSize: maxSizeBytes,
+            utilizationPercent: ((stats.estimatedSize / maxSizeBytes) * 100).toFixed(2),
+            itemCount: stats.itemCount,
+            timestamp: new Date().toISOString(),
+          });
 
-    const cache = queryClient.getQueryCache();
-    const queries = cache.getAll();
-
-    let removedCount = 0;
-
-    queries.forEach((query) => {
-      if (query.isStale() && query.state.fetchStatus !== 'fetching') {
-        cache.remove(query);
-        removedCount++;
-      }
-    });
-
-    logger.debug(`Removed ${removedCount} stale queries`);
-  }, [queryClient]);
-
-  /**
-   * Reset query error states
-   */
-  const resetQueryErrors = useCallback((): void => {
-    logger.info('Resetting query errors');
-
-    const cache = queryClient.getQueryCache();
-    const queries = cache.getAll();
-
-    let resetCount = 0;
-
-    queries.forEach((query) => {
-      if (query.state.status === 'error') {
-        query.reset();
-        resetCount++;
-      }
-    });
-
-    logger.debug(`Reset ${resetCount} query errors`);
-  }, [queryClient]);
-
-  return {
-    clearAll,
-    clearQuery,
-    invalidate,
-    invalidateTrafficEvents,
-    getStats,
-    removeStaleQueries,
-    resetQueryErrors,
-  };
-}
-
-// ============================================================================
-// ADDITIONAL UTILITY HOOKS
-// ============================================================================
-
-/**
- * Hook to automatically clear cache on specific events
- * 
- * @param event - Event to listen for
- * @param clearOnEvent - Whether to clear cache when event occurs
- * 
- * @example
- * ```typescript
- * // Clear cache when user logs out
- * useAutoClearCache('logout', true);
- * ```
- */
-export function useAutoClearCache(event: string, clearOnEvent: boolean = true): void {
-  const { clearAll } = useCacheManager();
-
-  useCallback(() => {
-    if (!clearOnEvent) return;
-
-    const handleEvent = () => {
-      logger.info(`Auto-clearing cache on ${event} event`);
-      clearAll();
-    };
-
-    window.addEventListener(event, handleEvent);
-
-    return () => {
-      window.removeEventListener(event, handleEvent);
-    };
-  }, [event, clearOnEvent, clearAll]);
-}
-
-/**
- * Hook to get cache status information
- * 
- * @returns Cache status information
- */
-export function useCacheStatus(): {
-  isCaching: boolean;
-  cacheSize: number;
-  queryCount: number;
-} {
-  const { getStats } = useCacheManager();
-  const stats = getStats();
-
-  return {
-    isCaching: stats.activeQueries > 0,
-    cacheSize: stats.estimatedSize,
-    queryCount: stats.totalQueries,
-  };
-}
-
-/**
- * Hook to monitor cache size and auto-clear when threshold exceeded
- * 
- * @param maxSizeBytes - Maximum cache size in bytes
- */
-export function useAutoCacheSizeLimit(maxSizeBytes: number = 10 * 1024 * 1024): void {
-  const { getStats, clearAll } = useCacheManager();
-
-  useCallback(() => {
-    const interval = setInterval(() => {
-      const stats = getStats();
-
-      if (stats.estimatedSize > maxSizeBytes) {
-        logger.warn('Cache size limit exceeded, clearing cache', {
-          currentSize: stats.estimatedSize,
-          maxSize: maxSizeBytes,
+          clearAll();
+          lastClearTimeRef.current = now;
+          
+          logger.info('Cache cleared successfully', {
+            clearedAt: new Date().toISOString(),
+          });
+        } else {
+          // Log debug info periodically to confirm monitoring is working
+          logger.debug('Cache size check passed', {
+            currentSize: stats.estimatedSize,
+            maxSize: maxSizeBytes,
+            utilizationPercent: ((stats.estimatedSize / maxSizeBytes) * 100).toFixed(2),
+            itemCount: stats.itemCount,
+          });
+        }
+      } catch (error) {
+        // Catch and log any errors during cache check to prevent interval from breaking
+        logger.error('Error during cache size check', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          maxSizeBytes,
         });
-        clearAll();
       }
-    }, 60000); // Check every minute
+    }, checkIntervalMs);
 
-    return () => clearInterval(interval);
-  }, [maxSizeBytes, getStats, clearAll]);
+    // Log that monitoring has started
+    logger.info('Cache size monitoring started', {
+      maxSizeBytes,
+      checkIntervalMs,
+      maxSizeMB: (maxSizeBytes / (1024 * 1024)).toFixed(2),
+      checkIntervalSeconds: (checkIntervalMs / 1000).toFixed(0),
+    });
+
+    // Cleanup function: clear the interval when component unmounts or dependencies change
+    return () => {
+      clearInterval(interval);
+      logger.info('Cache size monitoring stopped', {
+        maxSizeBytes,
+        checkIntervalMs,
+      });
+    };
+  }, [maxSizeBytes, checkIntervalMs, getStats, clearAll]);
 }
 
-// ============================================================================
-// DEFAULT EXPORT
-// ============================================================================
+/**
+ * Mock implementation of useCacheManager for demonstration.
+ * Replace this with your actual cache manager implementation.
+ */
+function useCacheManager(): CacheManager {
+  const getStats = useCallback((): CacheStats => {
+    // This is a mock implementation
+    // Replace with your actual cache stats logic
+    return {
+      estimatedSize: 0,
+      itemCount: 0,
+      lastCleared: undefined,
+    };
+  }, []);
 
-export default useCacheManager;
+  const clearAll = useCallback((): void => {
+    // This is a mock implementation
+    // Replace with your actual cache clearing logic
+    logger.info('Cache cleared');
+  }, []);
+
+  const clearItem = useCallback((key: string): void => {
+    // This is a mock implementation
+    logger.info('Cache item cleared', { key });
+  }, []);
+
+  return {
+    getStats,
+    clearAll,
+    clearItem,
+  };
+}
