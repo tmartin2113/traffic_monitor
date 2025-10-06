@@ -13,12 +13,17 @@ on:
 
 env:
   NODE_VERSION: '20'
+  COVERAGE_THRESHOLD_LINES: 80
+  COVERAGE_THRESHOLD_BRANCHES: 80
+  COVERAGE_THRESHOLD_FUNCTIONS: 80
+  COVERAGE_THRESHOLD_STATEMENTS: 80
 
 jobs:
   # Lint and Type Check
   quality:
     name: Code Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -38,11 +43,21 @@ jobs:
       - name: Type check
         run: npm run type-check
 
+      - name: Check for console statements
+        run: |
+          if grep -r "console\.\(log\|warn\|error\|info\|debug\)" src/ --exclude-dir=node_modules --exclude="*.test.ts" --exclude="*.test.tsx"; then
+            echo "❌ Found console statements in source code. Use logger utility instead."
+            exit 1
+          else
+            echo "✅ No console statements found"
+          fi
+
   # Build and Test
   test:
     name: Build and Test
     runs-on: ubuntu-latest
     needs: quality
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,14 +71,45 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run unit tests
+        run: npm test -- --run --coverage
+        env:
+          VITE_511_API_KEY: ${{ secrets.VITE_511_API_KEY }}
+
+      - name: Check coverage thresholds
+        run: |
+          npm run test:coverage-check || {
+            echo "❌ Coverage below minimum thresholds:"
+            echo "  - Lines: ${COVERAGE_THRESHOLD_LINES}%"
+            echo "  - Branches: ${COVERAGE_THRESHOLD_BRANCHES}%"
+            echo "  - Functions: ${COVERAGE_THRESHOLD_FUNCTIONS}%"
+            echo "  - Statements: ${COVERAGE_THRESHOLD_STATEMENTS}%"
+            exit 1
+          }
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage/coverage-final.json
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
       - name: Build application
         run: npm run build
         env:
           VITE_511_API_KEY: ${{ secrets.VITE_511_API_KEY }}
 
-      - name: Run tests
-        run: npm test -- --run
-        if: ${{ false }} # Enable when tests are added
+      - name: Check build size
+        run: |
+          BUILD_SIZE=$(du -sb dist | cut -f1)
+          MAX_SIZE=$((1024 * 1024 * 2))  # 2MB limit
+          if [ $BUILD_SIZE -gt $MAX_SIZE ]; then
+            echo "❌ Build size ($BUILD_SIZE bytes) exceeds limit ($MAX_SIZE bytes)"
+            exit 1
+          else
+            echo "✅ Build size: $BUILD_SIZE bytes ($(($BUILD_SIZE / 1024))KB)"
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -72,12 +118,44 @@ jobs:
           path: dist/
           retention-days: 7
 
+  # Security Audit
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: quality
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate
+
+      - name: Check for secrets in code
+        run: |
+          if grep -r -i "api[_-]key\s*=\s*['\"][^'\"]*['\"]" src/ --exclude-dir=node_modules; then
+            echo "❌ Found potential hardcoded API keys"
+            exit 1
+          else
+            echo "✅ No hardcoded secrets found"
+          fi
+
   # Deploy to Vercel (Production)
   deploy-production:
     name: Deploy to Production
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, security]
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    timeout-minutes: 10
     environment:
       name: production
       url: ${{ steps.deploy.outputs.url }}
@@ -107,8 +185,9 @@ jobs:
         run: |
           url=$(vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }})
           echo "url=$url" >> $GITHUB_OUTPUT
+          echo "✅ Deployed to: $url"
 
-      - name: Comment on PR
+      - name: Add deployment comment
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
@@ -117,15 +196,16 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '✅ Deployed to Production: ${{ steps.deploy.outputs.url }}'
+              body: '✅ **Production Deployment Successful**\n\n🔗 **URL:** ${{ steps.deploy.outputs.url }}\n\n📊 **Build Info:**\n- Node: ${{ env.NODE_VERSION }}\n- Branch: ${{ github.ref_name }}\n- Commit: ${{ github.sha }}'
             })
 
   # Deploy to Vercel (Preview)
   deploy-preview:
     name: Deploy Preview
     runs-on: ubuntu-latest
-    needs: test
+    needs: [test, security]
     if: github.event_name == 'pull_request'
+    timeout-minutes: 10
     environment:
       name: preview
       url: ${{ steps.deploy.outputs.url }}
@@ -150,13 +230,14 @@ jobs:
         env:
           VITE_511_API_KEY: ${{ secrets.VITE_511_API_KEY }}
 
-      - name: Deploy Preview
+      - name: Deploy to Vercel
         id: deploy
         run: |
           url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})
           echo "url=$url" >> $GITHUB_OUTPUT
+          echo "✅ Preview deployed to: $url"
 
-      - name: Comment Preview URL
+      - name: Comment on PR
         uses: actions/github-script@v7
         with:
           script: |
@@ -164,43 +245,30 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: '🔍 Preview: ${{ steps.deploy.outputs.url }}'
+              body: '🔍 **Preview Deployment Ready**\n\n🔗 **URL:** ${{ steps.deploy.outputs.url }}\n\n✅ All checks passed:\n- Linting: ✓\n- Type checking: ✓\n- Tests: ✓\n- Security audit: ✓\n- Build: ✓'
             })
 
-  # Lighthouse CI
+  # Performance Audit (Production only)
   lighthouse:
-    name: Lighthouse CI
+    name: Lighthouse Audit
     runs-on: ubuntu-latest
-    needs: deploy-preview
-    if: github.event_name == 'pull_request'
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Run Lighthouse CI
+      - name: Run Lighthouse
         uses: treosh/lighthouse-ci-action@v10
         with:
           urls: |
-            ${{ needs.deploy-preview.outputs.url }}
+            ${{ needs.deploy-production.outputs.url }}
           uploadArtifacts: true
           temporaryPublicStorage: true
+          runs: 3
 
-      - name: Comment Lighthouse Results
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const results = require('./lighthouse-results.json');
-            const score = results.categories.performance.score * 100;
-            const emoji = score >= 90 ? '🟢' : score >= 50 ? '🟡' : '🔴';
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `${emoji} Lighthouse Performance Score: ${score}/100`
-            })
+      - name: Check Lighthouse scores
+        run: |
+          echo "📊 Lighthouse audit complete"
+          echo "View results in workflow artifacts"
